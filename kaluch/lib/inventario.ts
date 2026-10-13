@@ -33,8 +33,12 @@ export interface FilaInventario {
  * Inventario derivado (compras − salidas), por producto y tienda. No se importa: se calcula.
  * Las devoluciones de venta suman; mermas y consumo interno van en «ajustes».
  */
-export function inventarioDerivado(ds: Pick<Dataset, 'compras' | 'salidas' | 'productos'>, tienda?: string): FilaInventario[] {
+export function inventarioDerivado(ds: Pick<Dataset, 'compras' | 'salidas' | 'productos'> & Partial<Pick<Dataset, 'tiendas'>>, tienda?: string): FilaInventario[] {
   const costos = costosPromedio(ds)
+  // La Tienda Web no tiene almacén: vende del Almacén Central, o del local donde recoge el cliente (`destino`).
+  const webs = new Set((ds.tiendas ?? []).filter((t) => t.tipo === 'web').map((t) => t.id))
+  const central = ds.tiendas?.find((t) => t.tipo === 'almacen')?.id ?? 'almacen'
+  const origenStock = (s: Dataset['salidas'][number]) => (webs.has(s.tienda) ? s.destino || central : s.tienda)
   const filas = new Map<string, FilaInventario>()
   const fila = (producto: string, t: string) => {
     const k = `${producto}|${t}`
@@ -50,8 +54,9 @@ export function inventarioDerivado(ds: Pick<Dataset, 'compras' | 'salidas' | 'pr
     fila(c.producto, c.tienda).entradas += c.cantidad
   }
   for (const s of ds.salidas) {
-    if (!s.producto || !s.cantidad || (tienda && s.tienda !== tienda)) continue
-    const f = fila(s.producto, s.tienda)
+    const t = origenStock(s)
+    if (!s.producto || !s.cantidad || (tienda && t !== tienda)) continue
+    const f = fila(s.producto, t)
     if (s.tipo === 'venta') f.ventas += s.cantidad
     else if (s.tipo === 'devolucion') f.ventas -= s.cantidad
     else if (s.tipo === 'ajuste') f.ajustes += s.cantidad

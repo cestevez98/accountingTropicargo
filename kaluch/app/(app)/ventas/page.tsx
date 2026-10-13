@@ -84,6 +84,17 @@ export default async function Ventas({ searchParams }: { searchParams: SP }) {
                 </select>
               </label>
               <label>
+                <span className="etiqueta">Recogida en (solo Web)</span>
+                <select name="destino" defaultValue="" className="input">
+                  <option value="">Envío desde Almacén Central</option>
+                  {tiendasForm.filter((t) => t.tipo === 'local').map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.nombre}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
                 <span className="etiqueta">No. operación</span>
                 <input name="operacion" className="input" />
               </label>

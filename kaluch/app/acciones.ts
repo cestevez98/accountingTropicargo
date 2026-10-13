@@ -155,6 +155,8 @@ export async function accionSalida(_prev: Resultado | null, form: FormData): Pro
       origen: 'manual',
       nota: str(form, 'nota') || undefined,
     }
+    // Venta web con recogida en tienda: sale del inventario del local elegido.
+    if (ds.tiendas.find((t) => t.id === sal.tienda)?.tipo === 'web' && str(form, 'destino')) sal.destino = str(form, 'destino')
     if (!sal.producto) throw new Error('Indica el producto.')
     comprobarMes(s, ds.settings, sal.fecha)
     await mutar({ salidas: [] as Salida[] }, ({ salidas }) => ({ salidas: [...salidas, sal] }))

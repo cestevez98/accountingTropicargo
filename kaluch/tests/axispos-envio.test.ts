@@ -45,3 +45,26 @@ describe('envío a AxisPOS', () => {
     expect(areaAlmacen(t, [{ code: '12', nombre: 'PISO DE VENTA 26', tipo: 7 }, { code: '2', nombre: 'ALMACEN 26', tipo: 3 }])).toBe('2')
   })
 })
+
+import { inventarioDerivado } from '../lib/inventario'
+
+describe('inventario de la Tienda Web', () => {
+  it('descuenta del Almacén Central o del local de recogida', () => {
+    const ds = {
+      tiendas: DEFAULT_TIENDAS,
+      productos: [],
+      compras: [
+        { id: 'c1', fecha: '2026-10-01', tienda: 'almacen', producto: 'ARROZ', cantidad: 10, moneda: 'USD' as const, importe: 10, importeUSD: 10, pago: 'contado' as const, fiscal: false, origen: 'manual' as const },
+        { id: 'c2', fecha: '2026-10-01', tienda: 'km26', producto: 'ARROZ', cantidad: 5, moneda: 'USD' as const, importe: 5, importeUSD: 5, pago: 'contado' as const, fiscal: false, origen: 'manual' as const },
+      ],
+      salidas: [
+        { id: 's1', tipo: 'venta' as const, fecha: '2026-10-02', tienda: 'web', producto: 'ARROZ', cantidad: 3, origen: 'manual' as const },
+        { id: 's2', tipo: 'venta' as const, fecha: '2026-10-02', tienda: 'web', destino: 'km26', producto: 'ARROZ', cantidad: 2, origen: 'manual' as const },
+      ],
+    }
+    const inv = inventarioDerivado(ds)
+    expect(inv.find((f) => f.tienda === 'almacen')?.existencia).toBe(7)
+    expect(inv.find((f) => f.tienda === 'km26')?.existencia).toBe(3)
+    expect(inv.some((f) => f.tienda === 'web')).toBe(false)
+  })
+})
