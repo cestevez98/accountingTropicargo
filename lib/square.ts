@@ -73,7 +73,9 @@ export async function transaccionesSquare(desde: string, hasta: string): Promise
       const tarjeta = p.card_details?.card ? `${p.card_details.card.card_brand ?? 'tarjeta'} ${p.card_details.card.last_4 ?? ''}`.trim() : p.source_type
       const r = refs(p.note)
       const quien = [p.buyer_email_address, tarjeta].filter(Boolean).join(' · ')
-      filas.push([f, `${r.length ? `${r.join(', ')} ` : ''}Pago Square${quien ? ` · ${quien}` : ''}`, p.note ?? '', usd(p.total_money), p.total_money.currency, p.id])
+      // Sin nota no se sabe si es una factura de Tracking Premium u otro negocio (pasajes, remesas…): queda por clasificar.
+      const tipo = p.note?.trim() ? 'Pago Square' : 'Venta Square sin nota'
+      filas.push([f, `${r.length ? `${r.join(', ')} ` : ''}${tipo}${quien ? ` · ${quien}` : ''}`, p.note ?? '', usd(p.total_money), p.total_money.currency, p.id])
       const fee = (p.processing_fee ?? []).reduce((a, x) => a + usd(x.amount_money), 0)
       if (fee) filas.push([f, `Comisión Square ${r.join(', ')}`.trim(), `Pago ${p.id}`, -Math.round(fee * 100) / 100, p.total_money.currency, `${p.id}-fee`])
     }
