@@ -1,4 +1,4 @@
-import { accionTasa } from '../../acciones'
+import { accionAxisEnviarTasa, accionTasa } from '../../acciones'
 import { FormAccion } from '@/components/FormAccion'
 import { Aviso, Encabezado, Importe, Paginador, url } from '@/components/ui'
 import { puedeRegistrar, requerirUsuario } from '@/lib/auth'
@@ -79,6 +79,18 @@ export default async function Tasas({ searchParams }: { searchParams: SP }) {
               </label>
             </div>
           </FormAccion>
+          {ds.settings.axispos?.url && (
+            <div className="mt-4 rounded-lg border border-border p-3">
+              <h3 className="text-sm font-semibold">Enviar al TPV</h3>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Pone en AxisPOS la tasa de la tienda (Toque + {margen}) del USD{base?.cupEur ? ', EUR' : ''}{base?.cupMlc ? ' y MLC' : ''}: con ella cobran las cajas. Hoy sería USD {base ? (base.kmVenta ?? base.cupUsd + margen) : '—'}
+                {base?.cupEur ? ` · EUR ${base.cupEur + margen}` : ''}.
+              </p>
+              <FormAccion accion={accionAxisEnviarTasa} boton="Enviar tasa al TPV" claseBoton="btn btn-exito mt-2" limpiar={false} confirmar="¿Cambiar la tasa de cobro en todas las cajas de AxisPOS?">
+                <input type="hidden" name="fecha" value={editar?.fecha ?? h} />
+              </FormAccion>
+            </div>
+          )}
           <p className="mt-2 text-xs text-muted-foreground">
             ¿Muchos días? Usa Importar → Tasas de cambio con la plantilla. Los cambios quedan en la auditoría (quién, cuándo, valor anterior → nuevo).
           </p>

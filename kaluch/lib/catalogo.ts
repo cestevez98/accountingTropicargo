@@ -8,6 +8,7 @@ export const DEFAULT_TIENDAS: Tienda[] = [
   { id: 'slazaro', nombre: 'San Lázaro', tipo: 'local', activa: true },
   { id: 'ayestaran', nombre: 'Ayestarán', tipo: 'local', activa: true },
   { id: 'cerro', nombre: 'Cerro', tipo: 'local', activa: true },
+  { id: 'playa', nombre: 'Playa', tipo: 'local', direccion: 'Pendiente de apertura', activa: true },
   { id: 'web', nombre: 'Tienda Web', tipo: 'web', activa: true },
 ]
 

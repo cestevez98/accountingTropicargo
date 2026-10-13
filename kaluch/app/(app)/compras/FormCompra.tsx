@@ -4,11 +4,13 @@ import { useState } from 'react'
 import { FormAccion } from '@/components/FormAccion'
 import { accionCompra } from '../../acciones'
 
-export function FormCompra({ tiendas, tiendaDefecto, tasaToque, tasaTienda, hoy, pagos }: { tiendas: { id: string; nombre: string }[]; tiendaDefecto: string; tasaToque?: number; tasaTienda?: number; hoy: string; pagos: [string, string][] }) {
+export function FormCompra({ tiendas, tiendaDefecto, tasaToque, tasaTienda, hoy, pagos, proveedoresTPV = [], tpv = false }: { tiendas: { id: string; nombre: string }[]; tiendaDefecto: string; tasaToque?: number; tasaTienda?: number; hoy: string; pagos: [string, string][]; proveedoresTPV?: { code: string; nombre: string }[]; tpv?: boolean }) {
   const [modo, setModo] = useState<'USD' | 'CUP'>('USD')
   const [clase, setClase] = useState<'toque' | 'tienda'>('toque')
   const [importe, setImporte] = useState('')
   const [distribuida, setDistribuida] = useState(false)
+  const [tienda, setTienda] = useState(tiendaDefecto)
+  const alCentral = distribuida || tienda === 'almacen'
   const [cantidad, setCantidad] = useState('')
   const [reparto, setReparto] = useState<Record<string, string>>({})
   const tasa = clase === 'tienda' ? tasaTienda : tasaToque
@@ -40,7 +42,7 @@ export function FormCompra({ tiendas, tiendaDefecto, tasaToque, tasaTienda, hoy,
         {!distribuida && (
           <label>
             <span className="etiqueta">Tienda</span>
-            <select name="tienda" defaultValue={tiendaDefecto} className="input">
+            <select name="tienda" value={tienda} onChange={(e) => setTienda(e.target.value)} className="input">
               {tiendas.map((t) => (
                 <option key={t.id} value={t.id}>
                   {t.nombre}
@@ -53,10 +55,24 @@ export function FormCompra({ tiendas, tiendaDefecto, tasaToque, tasaTienda, hoy,
           <span className="etiqueta">Mercancía</span>
           <input name="producto" list="productos" className="input" />
         </label>
-        <label>
-          <span className="etiqueta">Proveedor</span>
-          <input name="proveedor" className="input" />
-        </label>
+        {proveedoresTPV.length ? (
+          <label>
+            <span className="etiqueta">Proveedor (AxisPOS)</span>
+            <select name="codigoProveedor" className="input" defaultValue="">
+              <option value="">— elegir —</option>
+              {proveedoresTPV.map((p) => (
+                <option key={p.code} value={p.code}>
+                  {p.nombre}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <label>
+            <span className="etiqueta">Proveedor</span>
+            <input name="proveedor" className="input" />
+          </label>
+        )}
         <label>
           <span className="etiqueta">Factura</span>
           <input name="factura" className="input" />
@@ -94,22 +110,29 @@ export function FormCompra({ tiendas, tiendaDefecto, tasaToque, tasaTienda, hoy,
           <input type="checkbox" name="fiscal" /> Fiscal
         </label>
         <label className="flex items-end gap-2 pb-2 text-sm">
-          <input type="checkbox" name="distribuida" checked={distribuida} onChange={(e) => setDistribuida(e.target.checked)} /> Compra distribuida
+          <input type="checkbox" name="distribuida" checked={distribuida} onChange={(e) => setDistribuida(e.target.checked)} /> Distribuir a mercados
         </label>
+        {tpv && alCentral && (
+          <label className="flex items-end gap-2 pb-2 text-sm" title="Sube la compra al ALMACEN CENTRAL de AxisPOS y los traslados a cada mercado.">
+            <input type="checkbox" name="enviarAxis" defaultChecked /> Subir a AxisPOS
+          </label>
+        )}
       </div>
       {distribuida && (
         <div className="mt-3 rounded-lg border border-border p-3">
-          <p className="mb-2 text-xs text-muted-foreground">Reparte las unidades de esta factura entre las tiendas. El importe se prorratea por cantidad y todas las partes comparten la factura.</p>
+          <p className="mb-2 text-xs text-muted-foreground">La compra entra entera al Almacén Central y de ahí sale un traslado a cada mercado con las unidades que indiques (al costo de la factura). Lo que no repartas se queda en el central.</p>
           <div className="grid gap-2 sm:grid-cols-4 lg:grid-cols-8">
-            {tiendas.map((t) => (
+            {tiendas
+              .filter((t) => t.id !== 'almacen')
+              .map((t) => (
               <label key={t.id}>
                 <span className="etiqueta">{t.nombre}</span>
                 <input name={`q_${t.id}`} inputMode="decimal" className="input" value={reparto[t.id] ?? ''} onChange={(e) => setReparto({ ...reparto, [t.id]: e.target.value })} />
               </label>
-            ))}
+              ))}
           </div>
-          <p className={`mt-2 text-sm font-medium ${total && Math.abs(asignado - total) > 0.0001 ? 'text-danger' : 'text-accent'}`}>
-            Asignado {asignado} {total ? `de ${total}` : ''}
+          <p className={`mt-2 text-sm font-medium ${total && asignado - total > 0.0001 ? 'text-danger' : 'text-accent'}`}>
+            A mercados {asignado} {total ? `de ${total} · quedan ${total - asignado} en el central` : ''}
           </p>
         </div>
       )}

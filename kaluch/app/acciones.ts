@@ -5,7 +5,8 @@ import { cookies } from 'next/headers'
 import { redirect } from 'next/navigation'
 import { aplicarLote } from '@/lib/aplicar'
 import { autorizar, cerrarSesion, hashPassword, iniciarSesion, tiendaFija, verificarPassword, type Sesion } from '@/lib/auth'
-import { ClienteAxis, mapaAreas, mapearOperaciones, proponerAreas } from '@/lib/axispos'
+import { ClienteAxis, mapaAreas, mapearOperaciones, proponerAreas, type OperacionTPV } from '@/lib/axispos'
+import { areaAlmacen, monedasConTasa, notaKA, operacionCompra, operacionTraslado, SERIE_INICIAL } from '@/lib/axispos-envio'
 import { DEFAULT_SETTINGS } from '@/lib/catalogo'
 import { cargarDataset, leerUsuarios, registrarAuditoria } from '@/lib/data'
 import { COLECCIONES_OPERATIVAS, DEFECTOS } from '@/lib/defectos'
@@ -15,7 +16,7 @@ import type { LoteKM } from '@/lib/importar-km'
 import { leerArchivo, type TipoImport } from '@/lib/plantillas'
 import { ROLES_LISTA } from '@/lib/permisos'
 import { borrarSubida, leerSubida, mutar } from '@/lib/store'
-import type { Asiento, Categoria, CategoriaPago, Compra, Dataset, Deuda, LineaER, Moneda, Movimiento, Producto, Rol, Salida, Settings, Tasa, Tienda, Usuario } from '@/lib/types'
+import type { Asiento, Categoria, CategoriaPago, Compra, Dataset, Deuda, EnvioAxis, LineaER, Moneda, Movimiento, Producto, Rol, Salida, Settings, Tasa, Tienda, Usuario } from '@/lib/types'
 
 export type Resultado = { ok: true; mensaje?: string } | { ok: false; error: string }
 
@@ -194,7 +195,7 @@ export async function accionCompra(_prev: Resultado | null, form: FormData): Pro
     const base = {
       fecha: f,
       producto: str(form, 'producto') || undefined,
-      proveedor: str(form, 'proveedor') || undefined,
+      proveedor: str(form, 'proveedor') || ds.settings.axispos?.proveedores?.find((p) => p.code === str(form, 'codigoProveedor'))?.nombre || undefined,
       factura: str(form, 'factura') || undefined,
       moneda: mon,
       pago: (str(form, 'pago') || 'contado') as CategoriaPago,
@@ -204,20 +205,36 @@ export async function accionCompra(_prev: Resultado | null, form: FormData): Pro
     }
     const cantidad = numero(form, 'cantidad', false)
     let nuevas: Compra[]
+    const codigos = { codigoProducto: str(form, 'codigoProducto') || undefined, codigoProveedor: str(form, 'codigoProveedor') || undefined }
+    let traslados: Salida[] = []
     if (form.get('distribuida') === 'on') {
-      const partes = ds.tiendas.map((t) => ({ t: t.id, q: numero(form, `q_${t.id}`, false) ?? 0 })).filter((p) => p.q > 0)
+      // La compra entra entera al Almacén Central y de ahí sale un traslado a cada mercado.
+      const partes = ds.tiendas.filter((t) => t.id !== 'almacen').map((t) => ({ t: t.id, q: numero(form, `q_${t.id}`, false) ?? 0 })).filter((p) => p.q > 0)
       const total = partes.reduce((a, p) => a + p.q, 0)
-      if (!partes.length) throw new Error('Reparte la cantidad entre al menos una tienda.')
-      if (cantidad && Math.abs(total - cantidad) > 0.0001) throw new Error(`Asignado ${total} de ${cantidad}: la distribución no cuadra.`)
+      if (!partes.length) throw new Error('Reparte la cantidad entre al menos un mercado.')
+      if (!cantidad) throw new Error('Indica la cantidad total de la factura.')
+      if (total - cantidad > 0.0001) throw new Error(`Repartes ${total} y la factura trae ${cantidad}.`)
       const grupo = uid()
-      nuevas = partes.map((p) => ({ ...base, id: uid(), tienda: p.t, cantidad: p.q, importe: (importe * p.q) / total, importeUSD: (usd * p.q) / total, grupo }))
+      const central: Compra = { ...base, ...codigos, id: uid(), tienda: 'almacen', cantidad, importe, importeUSD: usd, grupo }
+      nuevas = [central]
+      for (const p of partes) {
+        const costo = (usd * p.q) / cantidad
+        const destino = ds.tiendas.find((t) => t.id === p.t)!
+        traslados.push({ id: uid(), tipo: 'traslado', fecha: f, tienda: 'almacen', producto: base.producto, codigoProducto: codigos.codigoProducto, cantidad: p.q, costoUSD: costo, destino: p.t, grupo, origen: 'manual', nota: `a ${destino.nombre}` })
+        nuevas.push({ ...base, id: uid(), tienda: p.t, cantidad: p.q, importe: (importe * p.q) / cantidad, importeUSD: costo, pago: 'mercados', proveedor: 'Almacén Central', factura: `Traslado ${base.factura ?? ''}`.trim(), grupo, origen: 'manual' })
+      }
     } else {
-      nuevas = [{ ...base, id: uid(), tienda: tiendaDe(s, form, ds), cantidad, importe, importeUSD: usd }]
+      nuevas = [{ ...base, ...codigos, id: uid(), tienda: tiendaDe(s, form, ds), cantidad, importe, importeUSD: usd }]
     }
-    await mutar({ compras: [] as Compra[] }, ({ compras }) => ({ compras: [...compras, ...nuevas] }))
+    await mutar({ compras: [] as Compra[], salidas: [] as Salida[] }, ({ compras, salidas }) => ({ compras: [...compras, ...nuevas], ...(traslados.length ? { salidas: [...salidas, ...traslados] } : {}) }))
     await registrarAuditoria([{ usuario: s.email, accion: 'crear', coleccion: 'compras', ref: nuevas[0].id, detalle: `${nuevas.length} registro(s) · ${importe} ${mon}` }])
+    let extra = ''
+    if (form.get('enviarAxis') === 'on') {
+      const r = await enviarCompraAxis(nuevas[0].id)
+      extra = r.ok ? ` ${r.mensaje}` : ` No se pudo subir a AxisPOS: ${r.error}`
+    }
     refrescar()
-    return { ok: true, mensaje: nuevas.length > 1 ? `Compra distribuida en ${nuevas.length} tiendas.` : `Compra registrada (${usd.toFixed(2)} USD).` }
+    return { ok: true, mensaje: (traslados.length ? `Compra en el Almacén Central con ${traslados.length} traslados a mercados.` : `Compra registrada (${usd.toFixed(2)} USD).`) + extra }
   } catch (e) {
     return fallo(e)
   }
@@ -678,6 +695,92 @@ export async function accionVaciar(_prev: Resultado | null, form: FormData): Pro
   }
 }
 
+// ---------------------------------------------------------------- AxisPOS: lo que se sube
+
+/** Manda al TPV la tasa de la tienda (Toque + margen) del USD, EUR y MLC del día indicado. */
+export async function accionAxisEnviarTasa(_prev: Resultado | null, form: FormData): Promise<Resultado> {
+  try {
+    const s = await autorizar('tasas')
+    const ds = await cargarDataset()
+    const f = str(form, 'fecha') || new Date().toISOString().slice(0, 10)
+    const c = clienteAxis(ds)
+    const { data, cambios, fechaTasa } = monedasConTasa(await c.monedas(), prepararTasas(ds.tasas, ds.settings.margenTasa), f)
+    await c.guardarMonedas(data)
+    const detalle = cambios.map((x) => `${x.moneda} ${x.antes} → ${x.despues}`).join(', ')
+    await registrarAuditoria([{ usuario: s.email, accion: 'enviar tasa al TPV', coleccion: 'axispos', ref: fechaTasa, detalle }])
+    return { ok: true, mensaje: `Tasa del ${fechaTasa} enviada al TPV: ${detalle}.` }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+/**
+ * Sube una compra del Almacén Central (y los traslados de su distribución) a AxisPOS.
+ * Cada documento lleva la nota «KA:<id>» y un número de la serie propia; antes de subir se pregunta
+ * a la central qué notas faltan de verdad, así que repetir el envío no duplica.
+ */
+async function enviarCompraAxis(id: string): Promise<Resultado> {
+  const ds = await cargarDataset()
+  const cfg = ds.settings.axispos
+  const compra = ds.compras.find((c) => c.id === id)
+  if (!compra) throw new Error('La compra ya no existe.')
+  if (compra.tienda !== 'almacen') throw new Error('Solo se suben al TPV las compras del Almacén Central.')
+  const central = ds.tiendas.find((t) => t.id === 'almacen')
+  const areaCentral = areaAlmacen(central, cfg?.ubicaciones)
+  if (!areaCentral) throw new Error('El Almacén Central no tiene asignada su área del TPV (Integraciones).')
+  if (!cfg?.usuarioCodigo) throw new Error('Falta el usuario de AxisPOS con el que se firman las operaciones (Integraciones → Probar conexión).')
+  const traslados = compra.grupo ? ds.salidas.filter((x) => x.grupo === compra.grupo && x.tipo === 'traslado') : []
+  const ctx = { areaCentral, usuario: cfg.usuarioCodigo, productos: new Map(ds.productos.map((p) => [p.nombre, p])), tabla: prepararTasas(ds.tasas, ds.settings.margenTasa) }
+  const c = clienteAxis(ds)
+  const pendientes = [compra, ...traslados].filter((x) => !x.axis?.enviada)
+  if (!pendientes.length) return { ok: true, mensaje: 'Ya estaba subida al TPV.' }
+  const faltan = new Set(await c.documentosFaltantes(pendientes.map((x) => notaKA(x.id))))
+  let acct = cfg.siguienteAcct ?? SERIE_INICIAL
+  const numeros = new Map<string, number>()
+  const ops: OperacionTPV[] = []
+  for (const x of pendientes) {
+    if (!faltan.has(notaKA(x.id))) continue
+    const n = x.axis?.acct ?? acct++
+    numeros.set(x.id, n)
+    if ('pago' in x && 'moneda' in x && !('tipo' in x)) ops.push(operacionCompra(x as Compra, n, ctx))
+    else {
+      const t = x as Salida
+      const destino = areaAlmacen(ds.tiendas.find((d) => d.id === t.destino), cfg.ubicaciones)
+      if (!destino) throw new Error(`${ds.tiendas.find((d) => d.id === t.destino)?.nombre ?? t.destino} no tiene área del TPV asignada.`)
+      ops.push(operacionTraslado(t, n, destino, ctx))
+    }
+  }
+  const ahora = new Date().toISOString()
+  let error: string | undefined
+  if (ops.length) {
+    try {
+      await c.importarOperaciones(ops)
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e)
+    }
+  }
+  const marca = <T extends { id: string; axis?: EnvioAxis }>(x: T): T => (pendientes.some((p) => p.id === x.id) ? { ...x, axis: { acct: numeros.get(x.id) ?? x.axis?.acct ?? 0, ...(error ? { error } : { enviada: ahora }) } } : x)
+  await mutar({ compras: [] as Compra[], salidas: [] as Salida[], settings: DEFAULT_SETTINGS }, (a) => ({
+    compras: a.compras.map(marca),
+    salidas: a.salidas.map(marca),
+    settings: { ...DEFAULT_SETTINGS, ...a.settings, axispos: { ...a.settings.axispos!, siguienteAcct: Math.max(acct, a.settings.axispos?.siguienteAcct ?? SERIE_INICIAL) } },
+  }))
+  if (error) return { ok: false, error }
+  return { ok: true, mensaje: `Subida al TPV: ${ops.filter((o) => o.OperType === 1).length} compra y ${ops.filter((o) => o.OperType === 8).length} traslados.` }
+}
+
+export async function accionAxisEnviarCompra(_prev: Resultado | null, form: FormData): Promise<Resultado> {
+  try {
+    const s = await autorizar('compras')
+    const r = await enviarCompraAxis(str(form, 'id'))
+    await registrarAuditoria([{ usuario: s.email, accion: 'subir compra al TPV', coleccion: 'compras', ref: str(form, 'id'), detalle: r.ok ? r.mensaje : r.error }])
+    refrescar()
+    return r
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
 // ---------------------------------------------------------------- AxisPOS (SyncApi v2.1)
 
 export async function accionAxisConfig(_prev: Resultado | null, form: FormData): Promise<Resultado> {
@@ -708,16 +811,20 @@ function clienteAxis(ds: Dataset) {
 export async function accionAxisProbar(_prev?: Resultado | null, _f?: FormData): Promise<Resultado> {
   try {
     const s = await autorizar('integraciones')
-    const c = clienteAxis(await cargarDataset())
+    const ds0 = await cargarDataset()
+    const c = clienteAxis(ds0)
     await c.comprobar()
-    const ubic = (await c.ubicaciones()).filter((u) => !u.DeletedDb).map((u) => ({ code: String(u.Code), nombre: u.Name, grupo: u.Group }))
+    const ubic = (await c.ubicaciones()).filter((u) => !u.DeletedDb).map((u) => ({ code: String(u.Code), nombre: u.Name, grupo: u.Group, tipo: u.Type }))
+    const proveedores = (await c.socios()).filter((p) => /prov/i.test(p.Group ?? '')).map((p) => ({ code: String(p.Code), nombre: p.Name }))
+    const usuarios = await c.usuarios().catch(() => [])
+    const usuarioCodigo = usuarios.find((u) => u.Name?.toLowerCase() === (ds0.settings.axispos?.usuario ?? '').toLowerCase())?.Code
     // Las tiendas que todavía no tienen área reciben las que les corresponden por grupo o nombre.
     let asignadas = 0
     await mutar({ settings: DEFAULT_SETTINGS, tiendas: DEFECTOS.tiendas }, ({ settings, tiendas }) => {
       const prop = proponerAreas(ubic, tiendas)
       return {
-        settings: { ...DEFAULT_SETTINGS, ...settings, axispos: { ...settings.axispos!, ubicaciones: ubic } },
-        tiendas: tiendas.map((t) => {
+        settings: { ...DEFAULT_SETTINGS, ...settings, axispos: { ...settings.axispos!, ubicaciones: ubic, proveedores, ...(settings.axispos?.usuarioCodigo || !usuarioCodigo ? {} : { usuarioCodigo: String(usuarioCodigo) }) } },
+        tiendas: [...tiendas, ...DEFECTOS.tiendas.filter((d) => !tiendas.some((t) => t.id === d.id))].map((t) => {
           const codigos = prop.get(t.id)
           if (t.codigoTPV || !codigos) return t
           asignadas++
@@ -727,7 +834,7 @@ export async function accionAxisProbar(_prev?: Resultado | null, _f?: FormData):
     })
     await registrarAuditoria([{ usuario: s.email, accion: 'probar conexión', coleccion: 'axispos', detalle: `${ubic.length} áreas, ${asignadas} tiendas asignadas` }])
     refrescar()
-    return { ok: true, mensaje: `Conexión correcta. El tenant tiene ${ubic.length} áreas${asignadas ? `; se asignaron automáticamente a ${asignadas} tiendas (revísalo abajo)` : ''}.` }
+    return { ok: true, mensaje: `Conexión correcta. El tenant tiene ${ubic.length} áreas y ${proveedores.length} proveedores${asignadas ? `; se asignaron automáticamente a ${asignadas} tiendas (revísalo abajo)` : ''}.` }
   } catch (e) {
     return fallo(e)
   }

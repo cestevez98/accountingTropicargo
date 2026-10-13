@@ -1,4 +1,4 @@
-import { accionBorrar } from '../../acciones'
+import { accionAxisEnviarCompra, accionBorrar } from '../../acciones'
 import { BotonAccion } from '@/components/FormAccion'
 import { Filtros } from '@/components/Filtros'
 import { Chip, Encabezado, Importe, Paginador, url, Vacio } from '@/components/ui'
@@ -54,6 +54,8 @@ export default async function Compras({ searchParams }: { searchParams: SP }) {
             tasaTienda={t ? (t.kmCompra ?? t.cupUsd - ds.settings.margenTasa) : undefined}
             hoy={hoy()}
             pagos={Object.entries(PAGO_LABEL)}
+            proveedoresTPV={ds.settings.axispos?.proveedores ?? []}
+            tpv={Boolean(ds.settings.axispos?.url && ds.tiendas.find((x) => x.id === 'almacen')?.codigoTPV)}
           />
           <datalist id="productos">
             {ds.productos.slice(0, 3000).map((p) => (
@@ -103,6 +105,7 @@ export default async function Compras({ searchParams }: { searchParams: SP }) {
                   <th className="num">Importe USD</th>
                   <th>Pago</th>
                   <th title="Solo las compras y ventas marcadas Fiscal alimentan el módulo Fiscal.">Fiscal</th>
+                  <th>TPV</th>
                   {registrar && <th />}
                 </tr>
               </thead>
@@ -137,6 +140,26 @@ export default async function Compras({ searchParams }: { searchParams: SP }) {
                       <Chip tono={c.pago === 'credito' ? 'ambar' : c.pago === 'exterior' ? 'info' : 'gris'}>{PAGO_LABEL[c.pago] ?? c.pago}</Chip>
                     </td>
                     <td>{c.fiscal ? <Chip tono="verde">Sí</Chip> : <span className="text-xs text-muted-foreground">No</span>}</td>
+                    <td>
+                      {c.origen === 'tpv' ? (
+                        <Chip tono="gris">del TPV</Chip>
+                      ) : c.axis?.enviada ? (
+                        <Chip tono="verde" title={`Documento ${c.axis.acct} · ${c.axis.enviada.slice(0, 16)}`}>
+                          Subida #{c.axis.acct}
+                        </Chip>
+                      ) : c.tienda === 'almacen' && c.origen === 'manual' && registrar ? (
+                        <div>
+                          {c.axis?.error && (
+                            <Chip tono="rojo" title={c.axis.error}>
+                              Error
+                            </Chip>
+                          )}
+                          <BotonAccion accion={accionAxisEnviarCompra} campos={{ id: c.id }} confirmar="¿Subir esta compra (y sus traslados) a AxisPOS?" className="text-xs text-primary hover:underline">
+                            Subir al TPV
+                          </BotonAccion>
+                        </div>
+                      ) : null}
+                    </td>
                     {registrar && (
                       <td>
                         {c.origen === 'manual' && (

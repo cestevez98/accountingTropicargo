@@ -1,5 +1,5 @@
 import 'server-only'
-import { gunzipSync } from 'node:zlib'
+import { gunzipSync, gzipSync } from 'node:zlib'
 import type { Compra, Moneda, Movimiento, Salida, Tienda } from './types'
 
 /**
@@ -134,16 +134,18 @@ export class ClienteAxis {
     return `${this.base}|${this.usuario}`
   }
 
-  private async pedir(ruta: string, init: { method: 'GET' | 'POST'; cuerpo?: unknown; query?: string; conToken?: boolean }): Promise<unknown> {
+  private async pedir(ruta: string, init: { method: 'GET' | 'POST'; cuerpo?: unknown; query?: string; conToken?: boolean; gzip?: boolean }): Promise<unknown> {
     const headers: Record<string, string> = { Accept: 'application/json', 'Accept-Encoding': 'gzip' }
     if (init.conToken !== false) headers.Authorization = `Bearer ${await this.token()}`
     if (init.cuerpo !== undefined) headers['Content-Type'] = 'application/json'
+    // ImportOperations descomprime siempre: el cuerpo tiene que ir en GZIP.
+    if (init.gzip) headers['Content-Encoding'] = 'gzip'
     let r: Response
     try {
       r = await fetch(`${this.base}/SyncApi/${ruta}${init.query ?? ''}`, {
         method: init.method,
         headers,
-        body: init.cuerpo !== undefined ? JSON.stringify(init.cuerpo) : undefined,
+        body: init.cuerpo === undefined ? undefined : init.gzip ? new Uint8Array(gzipSync(JSON.stringify(init.cuerpo))) : JSON.stringify(init.cuerpo),
         signal: AbortSignal.timeout(90_000),
       })
     } catch (e) {
@@ -224,6 +226,48 @@ export class ClienteAxis {
       caja: j?.CashbookSyncs ?? [],
       marcas: { op: j?.LastOperationsId ?? opt.marcas?.op ?? 0, pago: j?.LastPaymentId ?? opt.marcas?.pago ?? 0, caja: j?.LastCashbookId ?? opt.marcas?.caja ?? 0 } as Marcas,
     }
+  }
+
+  /** Monedas del tenant (Name, ExchangeRate = CUP por unidad…). */
+  async monedas(): Promise<Record<string, unknown>[]> {
+    const j = (await this.pedir('ImportExportCurrencies', { method: 'POST', cuerpo: { data: [] } })) as { data?: Record<string, unknown>[] } | null
+    return j?.data ?? []
+  }
+
+  /** Escribe monedas en la central (se crean o se actualizan por Name). */
+  async guardarMonedas(data: Record<string, unknown>[]) {
+    return this.pedir('ImportExportCurrencies', { method: 'POST', cuerpo: { data } })
+  }
+
+  /** Socios (proveedores y clientes). since=0 trae todos, no solo los de los últimos 10 días. */
+  async socios(): Promise<{ Code: string; Name: string; Group?: string }[]> {
+    const j = (await this.pedir('ImportExportPartners', { method: 'POST', cuerpo: { data: [] }, query: '?since=0' })) as { data?: [] } | null
+    return j?.data ?? []
+  }
+
+  /** Usuarios del tenant (para elegir con qué usuario se firman las operaciones que se suben). */
+  async usuarios(): Promise<{ Code: string; Name: string; UserLevel?: number }[]> {
+    const j = (await this.pedir('ImportExportUsers', { method: 'POST', cuerpo: { data: [] } })) as { data?: [] } | null
+    return j?.data ?? []
+  }
+
+  /** Crea o actualiza ubicaciones (áreas) en la central. */
+  async guardarUbicaciones(data: Record<string, unknown>[]) {
+    return this.pedir('ImportExportLocations', { method: 'POST', cuerpo: { data } })
+  }
+
+  /**
+   * Sube operaciones (compras, traslados…). Lote atómico: si una falla no se guarda ninguna.
+   * El cuerpo va en GZIP y la respuesta se comprueba (`status`), no solo el HTTP 200.
+   */
+  async importarOperaciones(operaciones: OperacionTPV[], syncId = `KA-${Date.now()}`) {
+    return this.pedir('ImportOperations', { method: 'POST', cuerpo: { SyncId: syncId, Operations: operaciones, CashbookSyncs: [] }, gzip: true })
+  }
+
+  /** De los identificadores dados, devuelve los que NO aparecen en la nota de ninguna operación de los últimos 15 días. */
+  async documentosFaltantes(ids: string[]): Promise<string[]> {
+    const j = await this.pedir('CheckDocumentsIds', { method: 'POST', cuerpo: { idsToCheck: ids } })
+    return Array.isArray(j) ? j.map(String) : ids
   }
 
   /** Existencias por área (GET con el JSON en `data`, respuesta en GZIP). */
@@ -312,6 +356,11 @@ export function mapearOperaciones(
     const tienda = porCodigo.get(area)
     if (!tienda) {
       sinTienda++
+      continue
+    }
+    // Lo que subió este sistema (nota «KA:…») ya está en la contabilidad: no se vuelve a importar.
+    if (/\bKA:/.test(o.Note ?? '')) {
+      ignorados.set('Subidas desde Kaluch Accounting', (ignorados.get('Subidas desde Kaluch Accounting') ?? 0) + 1)
       continue
     }
     const fecha = String(o.Date).slice(0, 10)

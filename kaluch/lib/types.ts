@@ -120,6 +120,11 @@ export interface Salida {
   /** Costo de lo que salió (USD). Si falta se toma el costo promedio del producto. */
   costoUSD?: number
   pago?: string
+  /** Traslados: tienda de destino y compra distribuida de la que salen. */
+  destino?: string
+  grupo?: string
+  codigoProducto?: string
+  axis?: EnvioAxis
   origen: Origen
   nota?: string
   lote?: string
@@ -156,9 +161,21 @@ export interface Compra {
   aporte?: boolean
   /** Compras distribuidas: todas las partes comparten este id. */
   grupo?: string
+  /** Códigos de AxisPOS de la mercancía y del proveedor (para subirla al TPV). */
+  codigoProducto?: string
+  codigoProveedor?: string
+  /** Estado del envío a AxisPOS. */
+  axis?: EnvioAxis
   origen: Origen
   nota?: string
   lote?: string
+}
+
+export interface EnvioAxis {
+  /** Número de documento usado en AxisPOS (serie propia). */
+  acct: number
+  enviada?: string
+  error?: string
 }
 
 /** Deudas que no salen de un movimiento de caja (préstamos, impuestos de nómina, deudas con Casa Matriz…). */
@@ -231,7 +248,13 @@ export interface Settings {
     /** Último día traído del TPV, por área. */
     ultimoDia?: Record<string, string>
     /** Áreas que devolvió la central la última vez (para asignarlas a las tiendas). */
-    ubicaciones?: { code: string; nombre: string; grupo?: string }[]
+    ubicaciones?: { code: string; nombre: string; grupo?: string; tipo?: number }[]
+    /** Proveedores del TPV (código y nombre). */
+    proveedores?: { code: string; nombre: string }[]
+    /** Usuario de AxisPOS con el que se firman las operaciones que se suben. */
+    usuarioCodigo?: string
+    /** Siguiente número de documento de la serie propia (no choca con los tickets del TPV). */
+    siguienteAcct?: number
     /** Primera fecha que se trae del TPV (lo anterior ya vino del Excel). */
     desde?: string
   }
