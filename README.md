@@ -57,3 +57,9 @@ npm run import:excel -- TROPICARGO_Contabilidad_Integrada.xlsx   # convierte el 
 ## Despliegue (Vercel)
 
 Variables de entorno: `AUTH_SECRET`, `ADMIN_EMAIL`, `ADMIN_PASSWORD` y `BLOB_READ_WRITE_TOKEN` (se crea al conectar un Blob store privado al proyecto). El primer inicio de sesión con `ADMIN_EMAIL`/`ADMIN_PASSWORD` crea la cuenta de administrador; después se gestionan los usuarios desde la aplicación.
+
+## PayPal (API)
+
+«Extractos → Traer de PayPal» descarga las transacciones con la Transaction Search API y las revisa igual que un extracto.
+Variables en Vercel: `PAYPAL_CLIENT_ID`, `PAYPAL_SECRET` (sensibles) y `PAYPAL_ENV=live`. La app de PayPal necesita «Transaction search» activada.
+Los cargos «PAYPAL *» de las tarjetas que recargan PayPal se clasifican como «Traspaso entre cajas» (reglas), y el gasto se registra del lado de PayPal.
