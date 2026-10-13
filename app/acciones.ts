@@ -1,0 +1,365 @@
+'use server'
+
+import { revalidatePath } from 'next/cache'
+import { redirect } from 'next/navigation'
+import { autorizar, cerrarSesion, hashPassword, iniciarSesion, verificarPassword } from '@/lib/auth'
+import { CUENTA_BALANCE_INFO, DEFAULT_SETTINGS } from '@/lib/catalog'
+import { COLECCIONES, type Campo } from '@/lib/colecciones'
+import { COLECCIONES_OPERATIVAS, DEFECTOS, leerUsuarios, registrarAuditoria } from '@/lib/data'
+import { esFecha } from '@/lib/fecha'
+import { mutar } from '@/lib/store'
+import type { Categoria, Cuenta, Dataset, Rol, Settings, Usuario } from '@/lib/types'
+
+export type Resultado = { ok: true; mensaje?: string } | { ok: false; error: string }
+
+const fallo = (e: unknown): Resultado => ({ ok: false, error: e instanceof Error ? e.message : String(e) })
+
+function refrescar() {
+  revalidatePath('/', 'layout')
+}
+
+// ---------------------------------------------------------------- sesión
+
+export async function accionLogin(_prev: Resultado | null, form: FormData): Promise<Resultado> {
+  const r = await iniciarSesion(String(form.get('email') ?? ''), String(form.get('password') ?? ''))
+  if (!r.ok) return r
+  redirect('/')
+}
+
+export async function accionLogout() {
+  await cerrarSesion()
+  redirect('/login')
+}
+
+// ---------------------------------------------------------------- registros genéricos
+
+type Fila = Record<string, unknown> & { id: string }
+
+function normalizarCampo(c: Campo, v: unknown, ds: Pick<Dataset, 'categorias' | 'cuentas'>): unknown {
+  const vacio = v == null || v === ''
+  switch (c.tipo) {
+    case 'numero': {
+      if (vacio) {
+        if (c.requerido) throw new Error(`«${c.label}» es obligatorio.`)
+        return undefined
+      }
+      const n = typeof v === 'number' ? v : Number(String(v).replace(',', '.'))
+      if (!Number.isFinite(n)) throw new Error(`«${c.label}» no es un número válido.`)
+      return Math.round(n * 1e6) / 1e6
+    }
+    case 'bool':
+      return v === true || v === 'true' || v === 'on' || v === 'Sí'
+    case 'fecha':
+      if (vacio) {
+        if (c.requerido) throw new Error(`«${c.label}» es obligatoria.`)
+        return undefined
+      }
+      if (!esFecha(v)) throw new Error(`«${c.label}» debe ser una fecha AAAA-MM-DD.`)
+      return v
+    case 'mes':
+      if (vacio) {
+        if (c.requerido) throw new Error(`«${c.label}» es obligatorio.`)
+        return undefined
+      }
+      if (!/^\d{4}-\d{2}$/.test(String(v))) throw new Error(`«${c.label}» debe tener el formato AAAA-MM.`)
+      return v
+    case 'lista':
+      return Array.isArray(v) ? v.map(String) : vacio ? [] : String(v).split(',').map((s) => s.trim()).filter(Boolean)
+    case 'select': {
+      if (vacio) {
+        if (c.requerido) throw new Error(`Elige «${c.label}».`)
+        return undefined
+      }
+      const s = String(v)
+      if (Array.isArray(c.opciones) && !c.opciones.includes(s)) throw new Error(`«${s}» no es un valor válido para ${c.label}.`)
+      if (c.opciones === 'categorias' && !ds.categorias.some((x) => x.nombre === s)) throw new Error(`La categoría «${s}» no existe en el catálogo.`)
+      if (c.opciones === 'cuentas' && !ds.cuentas.some((x) => x.nombre === s)) throw new Error(`La cuenta «${s}» no existe.`)
+      if (c.opciones === 'cuentasMayor' && !esCuentaMayor(s, ds)) throw new Error(`«${s}» no es una cuenta del mayor válida.`)
+      return s
+    }
+    default: {
+      const s = vacio ? '' : String(v).trim()
+      if (!s && c.requerido) throw new Error(`«${c.label}» es obligatorio.`)
+      return s || undefined
+    }
+  }
+}
+
+function esCuentaMayor(k: string, ds: Pick<Dataset, 'categorias' | 'cuentas'>) {
+  if (k.startsWith('tes:')) return ds.cuentas.some((c) => c.nombre === k.slice(4))
+  if (k.startsWith('res:')) return ds.categorias.some((c) => c.nombre === k.slice(4) && c.contrapartida === 'resultado')
+  return k in CUENTA_BALANCE_INFO
+}
+
+function mesCerrado(settings: Settings, fecha: unknown) {
+  return typeof fecha === 'string' && settings.mesesCerrados.includes(fecha.slice(0, 7))
+}
+
+export async function guardarRegistro(coleccion: string, id: string | null, valores: Record<string, unknown>): Promise<Resultado> {
+  try {
+    const cfg = COLECCIONES[coleccion]
+    if (!cfg) throw new Error('Colección desconocida.')
+    const s = await autorizar(cfg.rolesEditar)
+    let etiqueta = ''
+    await mutar(
+      { [coleccion]: [] as Fila[], categorias: DEFECTOS.categorias, cuentas: DEFECTOS.cuentas, settings: DEFAULT_SETTINGS, movimientos: [] as Fila[] } as Record<string, unknown>,
+      (actual) => {
+        const ds = actual as unknown as Dataset
+        const filas = actual[coleccion] as Fila[]
+        const previo = id ? filas.find((f) => f.id === id) : undefined
+        if (id && !previo) throw new Error('El registro ya no existe (quizá otro usuario lo borró).')
+        const nuevo: Fila = { ...(previo ?? {}), id: previo?.id ?? crypto.randomUUID() }
+        for (const c of cfg.campos) {
+          if (!(c.key in valores) && previo) continue
+          const v = normalizarCampo(c, valores[c.key], ds)
+          if (v === undefined) delete nuevo[c.key]
+          else nuevo[c.key] = v
+        }
+        validarEspecifico(coleccion, nuevo, s)
+        const fecha = cfg.campoFecha ? nuevo[cfg.campoFecha] : undefined
+        if (s.rol !== 'admin' && (mesCerrado(ds.settings, fecha) || (previo && mesCerrado(ds.settings, previo[cfg.campoFecha ?? '']))))
+          throw new Error('Ese mes está cerrado. Solo el administrador puede modificarlo.')
+        if (s.rol === 'cajero' && previo && !s.cuentas?.includes(String(previo.cuenta))) throw new Error('No puedes modificar movimientos de esa cuenta.')
+        etiqueta = cfg.etiqueta(nuevo)
+        const out: Record<string, unknown> = { [coleccion]: previo ? filas.map((f) => (f.id === previo.id ? nuevo : f)) : [nuevo, ...filas] }
+
+        // Cambios de nombre en catálogos: se actualizan los registros que los usan.
+        if (previo && (coleccion === 'categorias' || coleccion === 'cuentas') && previo.nombre !== nuevo.nombre) {
+          const dup = filas.some((f) => f.id !== nuevo.id && f.nombre === nuevo.nombre)
+          if (dup) throw new Error(`Ya existe «${nuevo.nombre}».`)
+          const campoRef = coleccion === 'categorias' ? 'categoria' : 'cuenta'
+          out.movimientos = (actual.movimientos as Fila[]).map((m) => (m[campoRef] === previo.nombre ? { ...m, [campoRef]: nuevo.nombre } : m))
+        }
+        if (!previo && (coleccion === 'categorias' || coleccion === 'cuentas') && filas.some((f) => f.nombre === nuevo.nombre))
+          throw new Error(`Ya existe «${nuevo.nombre}».`)
+        return out
+      },
+    )
+    await registrarAuditoria([{ usuario: s.email, accion: id ? 'editar' : 'crear', coleccion, registroId: id ?? undefined, detalle: etiqueta }])
+    refrescar()
+    return { ok: true, mensaje: id ? 'Cambios guardados.' : `${cfg.singular[0].toUpperCase()}${cfg.singular.slice(1)} creado.` }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+function validarEspecifico(coleccion: string, r: Fila, s: { rol: Rol; cuentas?: string[] }) {
+  if (coleccion === 'movimientos') {
+    const e = Number(r.entrada) || 0
+    const sa = Number(r.salida) || 0
+    if (e < 0 || sa < 0) throw new Error('Entrada y salida van en positivo.')
+    if (!e && !sa) throw new Error('Indica una entrada o una salida.')
+    r.entrada = e
+    r.salida = sa
+    if (s.rol === 'cajero' && !s.cuentas?.includes(String(r.cuenta))) throw new Error(`No tienes permiso para registrar en «${r.cuenta}».`)
+  }
+  if (coleccion === 'asientos') {
+    if (r.cargo === r.abono) throw new Error('El cargo y el abono deben ser cuentas distintas.')
+    if (!(Number(r.importe) > 0)) throw new Error('El importe debe ser mayor que 0.')
+  }
+  if (coleccion === 'facturasCompra' || coleccion === 'facturas') {
+    if (r.pagado == null) r.pagado = 0
+    if (r.cobrado == null && coleccion === 'facturas') r.cobrado = 0
+  }
+  if (coleccion === 'cxcManual' && r.cobrado == null) r.cobrado = 0
+}
+
+export async function borrarRegistro(coleccion: string, id: string): Promise<Resultado> {
+  try {
+    const cfg = COLECCIONES[coleccion]
+    if (!cfg) throw new Error('Colección desconocida.')
+    const s = await autorizar(cfg.rolesEditar)
+    let etiqueta = ''
+    await mutar({ [coleccion]: [] as Fila[], settings: DEFAULT_SETTINGS, movimientos: [] as Fila[], facturasCompra: [] as Fila[], devengos: [] as Fila[] } as Record<string, unknown>, (actual) => {
+      const filas = actual[coleccion] as Fila[]
+      const previo = filas.find((f) => f.id === id)
+      if (!previo) throw new Error('El registro ya no existe.')
+      const settings = actual.settings as Settings
+      if (s.rol !== 'admin' && mesCerrado(settings, previo[cfg.campoFecha ?? ''])) throw new Error('Ese mes está cerrado.')
+      if (s.rol === 'cajero' && !s.cuentas?.includes(String(previo.cuenta))) throw new Error('No puedes borrar movimientos de esa cuenta.')
+      if (coleccion === 'categorias') {
+        const usos = ['movimientos', 'facturasCompra', 'devengos'].reduce((a, k) => a + (actual[k] as Fila[]).filter((f) => f.categoria === previo.nombre).length, 0)
+        if (usos) throw new Error(`No se puede borrar: ${usos} registros usan «${previo.nombre}». Desactívala o renómbrala.`)
+      }
+      if (coleccion === 'cuentas') {
+        const usos = (actual.movimientos as Fila[]).filter((f) => f.cuenta === previo.nombre).length
+        if (usos) throw new Error(`No se puede borrar: ${usos} movimientos usan «${previo.nombre}». Desactívala.`)
+      }
+      etiqueta = cfg.etiqueta(previo)
+      return { [coleccion]: filas.filter((f) => f.id !== id) }
+    })
+    await registrarAuditoria([{ usuario: s.email, accion: 'borrar', coleccion, registroId: id, detalle: etiqueta }])
+    refrescar()
+    return { ok: true, mensaje: 'Registro borrado.' }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+/** Cambia la categoría de varios movimientos a la vez (bandeja «por clasificar»). */
+export async function cambiarCategoria(ids: string[], categoria: string): Promise<Resultado> {
+  try {
+    const s = await autorizar(['admin', 'contador'])
+    await mutar({ movimientos: [] as Fila[], categorias: DEFECTOS.categorias, settings: DEFAULT_SETTINGS } as Record<string, unknown>, (a) => {
+      const cats = a.categorias as Categoria[]
+      if (!cats.some((c) => c.nombre === categoria)) throw new Error('Categoría inválida.')
+      const set = new Set(ids)
+      const settings = a.settings as Settings
+      const movs = (a.movimientos as Fila[]).map((m) => {
+        if (!set.has(m.id)) return m
+        if (s.rol !== 'admin' && mesCerrado(settings, m.fecha)) throw new Error('Algún movimiento está en un mes cerrado.')
+        return { ...m, categoria }
+      })
+      return { movimientos: movs }
+    })
+    await registrarAuditoria([{ usuario: s.email, accion: 'editar', coleccion: 'movimientos', detalle: `${ids.length} movimientos → ${categoria}` }])
+    refrescar()
+    return { ok: true, mensaje: `${ids.length} movimiento(s) clasificados como «${categoria}».` }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+// ---------------------------------------------------------------- configuración
+
+export async function guardarApertura(valores: { fechaInicio: string; capitalApertura: number; cxcSistemaApertura: number; empresa: string }): Promise<Resultado> {
+  try {
+    const s = await autorizar(['admin'])
+    if (!esFecha(valores.fechaInicio) || !valores.fechaInicio.endsWith('-01')) throw new Error('La fecha de inicio debe ser el primer día de un mes.')
+    for (const k of ['capitalApertura', 'cxcSistemaApertura'] as const) if (!Number.isFinite(Number(valores[k]))) throw new Error('Importe inválido.')
+    await mutar({ settings: DEFAULT_SETTINGS }, ({ settings }) => ({
+      settings: {
+        ...settings,
+        empresa: valores.empresa.trim() || settings.empresa,
+        fechaInicio: valores.fechaInicio,
+        capitalApertura: Number(valores.capitalApertura),
+        cxcSistemaApertura: Number(valores.cxcSistemaApertura),
+      },
+    }))
+    await registrarAuditoria([{ usuario: s.email, accion: 'editar', coleccion: 'settings', detalle: JSON.stringify(valores) }])
+    refrescar()
+    return { ok: true, mensaje: 'Saldos de apertura guardados.' }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+export async function cerrarMes(mes: string, cerrar: boolean): Promise<Resultado> {
+  try {
+    const s = await autorizar(['admin'])
+    if (!/^\d{4}-\d{2}$/.test(mes)) throw new Error('Mes inválido.')
+    await mutar({ settings: DEFAULT_SETTINGS }, ({ settings }) => {
+      const set = new Set(settings.mesesCerrados)
+      if (cerrar) set.add(mes)
+      else set.delete(mes)
+      return { settings: { ...settings, mesesCerrados: [...set].sort() } }
+    })
+    await registrarAuditoria([{ usuario: s.email, accion: cerrar ? 'cerrar' : 'abrir', coleccion: 'settings', detalle: mes }])
+    refrescar()
+    return { ok: true, mensaje: cerrar ? `Mes ${mes} cerrado.` : `Mes ${mes} reabierto.` }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+// ---------------------------------------------------------------- importación
+
+const COLECCIONES_IMPORTABLES = new Set<string>([...COLECCIONES_OPERATIVAS, 'categorias', 'cuentas'])
+
+/** Recibe una colección (o un trozo) del Excel ya convertido en el navegador. */
+export async function importarParte(coleccion: string, filas: unknown[], reemplazar: boolean): Promise<Resultado> {
+  try {
+    await autorizar(['admin'])
+    if (!COLECCIONES_IMPORTABLES.has(coleccion)) throw new Error(`No se puede importar «${coleccion}».`)
+    if (!Array.isArray(filas)) throw new Error('Formato inválido.')
+    await mutar({ [coleccion]: [] as unknown[] }, (a) => ({ [coleccion]: reemplazar ? filas : [...(a[coleccion] as unknown[]), ...filas] }))
+    return { ok: true }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+export async function importarAjustes(settings: Partial<Settings>, resumen: string): Promise<Resultado> {
+  try {
+    const s = await autorizar(['admin'])
+    await mutar({ settings: DEFAULT_SETTINGS }, (a) => ({
+      settings: {
+        ...a.settings,
+        fechaInicio: settings.fechaInicio ?? a.settings.fechaInicio,
+        capitalApertura: Number(settings.capitalApertura ?? a.settings.capitalApertura),
+        cxcSistemaApertura: Number(settings.cxcSistemaApertura ?? a.settings.cxcSistemaApertura),
+      },
+    }))
+    await registrarAuditoria([{ usuario: s.email, accion: 'importar', coleccion: 'todas', detalle: resumen }])
+    refrescar()
+    return { ok: true, mensaje: 'Importación terminada.' }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+/** Borra todos los datos operativos (movimientos, facturas…). Conserva catálogo, cuentas y usuarios. */
+export async function vaciarDatos(confirmacion: string): Promise<Resultado> {
+  try {
+    const s = await autorizar(['admin'])
+    if (confirmacion !== 'VACIAR') throw new Error('Escribe VACIAR para confirmar.')
+    const vacio = Object.fromEntries(COLECCIONES_OPERATIVAS.map((k) => [k, [] as unknown[]]))
+    await mutar(vacio, () => ({ ...vacio }))
+    await mutar({ settings: DEFAULT_SETTINGS }, ({ settings }) => ({ settings: { ...settings, cxcSistemaApertura: 0, mesesCerrados: [] } }))
+    await registrarAuditoria([{ usuario: s.email, accion: 'borrar', coleccion: 'todas', detalle: 'Vaciado de datos operativos' }])
+    refrescar()
+    return { ok: true, mensaje: 'Datos borrados. El catálogo, las cuentas y los usuarios se conservan.' }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+// ---------------------------------------------------------------- usuarios
+
+export async function guardarUsuario(
+  id: string | null,
+  v: { email: string; nombre: string; rol: Rol; activo: boolean; cuentas: string[]; password?: string },
+): Promise<Resultado> {
+  try {
+    const s = await autorizar(['admin'])
+    const email = v.email.trim().toLowerCase()
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error('Correo inválido.')
+    if (!['admin', 'contador', 'cajero', 'lectura'].includes(v.rol)) throw new Error('Rol inválido.')
+    if (!id && (!v.password || v.password.length < 10)) throw new Error('La contraseña debe tener al menos 10 caracteres.')
+    if (v.password && v.password.length < 10) throw new Error('La contraseña debe tener al menos 10 caracteres.')
+    const hash = v.password ? await hashPassword(v.password) : undefined
+    await mutar({ usuarios: [] as Usuario[], cuentas: DEFECTOS.cuentas }, ({ usuarios, cuentas }) => {
+      if (usuarios.some((u) => u.email === email && u.id !== id)) throw new Error('Ya existe un usuario con ese correo.')
+      const cuentasValidas = v.cuentas.filter((c) => (cuentas as Cuenta[]).some((x) => x.nombre === c))
+      if (id) {
+        const u = usuarios.find((x) => x.id === id)
+        if (!u) throw new Error('El usuario no existe.')
+        if (u.id === s.id && (v.rol !== 'admin' || !v.activo)) throw new Error('No puedes quitarte a ti mismo el rol de administrador ni desactivarte.')
+        return { usuarios: usuarios.map((x) => (x.id === id ? { ...x, email, nombre: v.nombre.trim(), rol: v.rol, activo: v.activo, cuentas: cuentasValidas, ...(hash ? { hash } : {}) } : x)) }
+      }
+      return { usuarios: [...usuarios, { id: crypto.randomUUID(), email, nombre: v.nombre.trim(), rol: v.rol, activo: v.activo, cuentas: cuentasValidas, hash: hash! }] }
+    })
+    await registrarAuditoria([{ usuario: s.email, accion: id ? 'editar' : 'crear', coleccion: 'usuarios', detalle: `${email} (${v.rol})` }])
+    refrescar()
+    return { ok: true, mensaje: 'Usuario guardado.' }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+export async function cambiarMiPassword(_prev: Resultado | null, form: FormData): Promise<Resultado> {
+  try {
+    const s = await autorizar()
+    const actual = String(form.get('actual') ?? '')
+    const nueva = String(form.get('nueva') ?? '')
+    if (nueva.length < 10) throw new Error('La nueva contraseña debe tener al menos 10 caracteres.')
+    if (nueva !== String(form.get('repetir') ?? '')) throw new Error('Las contraseñas no coinciden.')
+    const u = (await leerUsuarios()).find((x) => x.id === s.id)
+    if (!u || !(await verificarPassword(actual, u.hash))) throw new Error('La contraseña actual no es correcta.')
+    const hash = await hashPassword(nueva)
+    await mutar({ usuarios: [] as Usuario[] }, ({ usuarios }) => ({ usuarios: usuarios.map((x) => (x.id === s.id ? { ...x, hash } : x)) }))
+    return { ok: true, mensaje: 'Contraseña cambiada.' }
+  } catch (e) {
+    return fallo(e)
+  }
+}
