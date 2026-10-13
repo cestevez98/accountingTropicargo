@@ -678,15 +678,16 @@ export async function accionVaciar(_prev: Resultado | null, form: FormData): Pro
   }
 }
 
-// ---------------------------------------------------------------- AxisPOS
+// ---------------------------------------------------------------- AxisPOS (SyncApi v2.1)
 
 export async function accionAxisConfig(_prev: Resultado | null, form: FormData): Promise<Resultado> {
   try {
     const s = await autorizar('integraciones')
-    const url = str(form, 'url')
-    if (url && !/^https?:\/\//.test(url)) throw new Error('La URL debe empezar por http:// o https://')
-    await mutar({ settings: DEFAULT_SETTINGS }, ({ settings }) => ({ settings: { ...DEFAULT_SETTINGS, ...settings, axispos: { ...settings.axispos, url, usuario: str(form, 'usuario') } } }))
-    await registrarAuditoria([{ usuario: s.email, accion: 'configurar', coleccion: 'axispos', detalle: url }])
+    let url = str(form, 'url').replace(/\/+$/, '').replace(/\/SyncApi$/i, '')
+    if (url && !/^https:\/\//.test(url)) url = `https://${url.replace(/^http:\/\//, '')}`
+    const cambios = { url, usuario: str(form, 'usuario'), cobros: form.get('cobros') === 'on', cuentaBanco: str(form, 'cuentaBanco').toUpperCase() || 'FISCAL' }
+    await mutar({ settings: DEFAULT_SETTINGS }, ({ settings }) => ({ settings: { ...DEFAULT_SETTINGS, ...settings, axispos: { ...settings.axispos, ...cambios } } }))
+    await registrarAuditoria([{ usuario: s.email, accion: 'configurar', coleccion: 'axispos', detalle: JSON.stringify(cambios) }])
     refrescar()
     return { ok: true, mensaje: 'Conexión guardada.' }
   } catch (e) {
@@ -696,48 +697,136 @@ export async function accionAxisConfig(_prev: Resultado | null, form: FormData):
 
 function clienteAxis(ds: Dataset) {
   const cfg = ds.settings.axispos
-  if (!cfg?.url || !cfg.usuario) throw new Error('Configura primero la URL y el usuario de AxisPOS.')
+  if (!cfg?.url || !cfg.usuario) throw new Error('Configura primero la dirección del tenant y el usuario de AxisPOS.')
   if (!process.env.AXISPOS_PASSWORD) throw new Error('Falta la variable de entorno AXISPOS_PASSWORD en Vercel.')
   return new ClienteAxis(cfg.url, cfg.usuario, process.env.AXISPOS_PASSWORD)
 }
 
-export async function accionAxisProbar(): Promise<Resultado> {
+/** Comprueba la conexión y trae las áreas del tenant para asignarlas a las tiendas. */
+export async function accionAxisProbar(_prev?: Resultado | null, _f?: FormData): Promise<Resultado> {
   try {
-    await autorizar('integraciones')
+    const s = await autorizar('integraciones')
     const c = clienteAxis(await cargarDataset())
-    await c.autenticar()
-    return { ok: true, mensaje: 'Conexión correcta: AxisPOS devolvió el token.' }
+    await c.comprobar()
+    const ubic = (await c.ubicaciones()).filter((u) => !u.DeletedDb).map((u) => ({ code: String(u.Code), nombre: u.Name }))
+    await mutar({ settings: DEFAULT_SETTINGS }, ({ settings }) => ({ settings: { ...DEFAULT_SETTINGS, ...settings, axispos: { ...settings.axispos!, ubicaciones: ubic } } }))
+    await registrarAuditoria([{ usuario: s.email, accion: 'probar conexión', coleccion: 'axispos', detalle: `${ubic.length} áreas` }])
+    refrescar()
+    return { ok: true, mensaje: `Conexión correcta. El tenant tiene ${ubic.length} áreas; asígnalas abajo a cada tienda.` }
   } catch (e) {
     return fallo(e)
   }
 }
 
-/** Trae del TPV las operaciones de un rango y las guarda (sustituye lo traído antes del TPV en ese rango). */
+/** Asigna el código de área del TPV (ObjectCode) a una tienda. */
+export async function accionAxisArea(_prev: Resultado | null, form: FormData): Promise<Resultado> {
+  try {
+    const s = await autorizar('integraciones')
+    const tienda = str(form, 'tienda')
+    const codigo = str(form, 'codigo')
+    await mutar({ tiendas: DEFECTOS.tiendas }, ({ tiendas }) => {
+      if (codigo && tiendas.some((t) => t.id !== tienda && t.codigoTPV === codigo)) throw new Error('Esa área ya está asignada a otra tienda.')
+      return { tiendas: tiendas.map((t) => (t.id === tienda ? { ...t, codigoTPV: codigo || undefined } : t)) }
+    })
+    await registrarAuditoria([{ usuario: s.email, accion: 'asignar área', coleccion: 'tiendas', ref: tienda, detalle: codigo }])
+    refrescar()
+    return { ok: true, mensaje: 'Guardado.' }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+/** Trae el catálogo de mercancías del TPV (código, nombre, grupo, unidad, costo y precio). */
+export async function accionAxisProductos(_prev?: Resultado | null, _f?: FormData): Promise<Resultado> {
+  try {
+    const s = await autorizar('integraciones')
+    const ds = await cargarDataset()
+    const items = await clienteAxis(ds).mercancias()
+    const tabla = prepararTasas(ds.tasas, ds.settings.margenTasa)
+    const t = tasaVigente(tabla, new Date().toISOString().slice(0, 10))
+    await mutar({ productos: [] as Producto[] }, ({ productos }) => {
+      const m = new Map(productos.map((p) => [p.nombre, p]))
+      for (const it of items) {
+        if (!it.Name) continue
+        const cupo = (it.Currency ?? 'CUP').toUpperCase() === 'USD' ? undefined : t?.cupUsd
+        const costoUSD = it.Cost ? (cupo ? it.Cost / cupo : it.Cost) : undefined
+        m.set(it.Name, { ...m.get(it.Name), codigo: String(it.Code), nombre: it.Name, grupo: it.Category || undefined, unidad: it.Unit || undefined, ...(costoUSD ? { costoUSD: Math.round(costoUSD * 1e4) / 1e4 } : {}), ...(it.Price ? { precioCUP: it.Price } : {}) })
+      }
+      return { productos: [...m.values()] }
+    })
+    await registrarAuditoria([{ usuario: s.email, accion: 'traer catálogo', coleccion: 'axispos', detalle: `${items.length} mercancías` }])
+    refrescar()
+    return { ok: true, mensaje: `${items.length} mercancías del TPV actualizadas en el catálogo.` }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+/**
+ * Trae las operaciones del TPV.
+ * - «novedades»: desde las marcas de agua guardadas de cada tienda (solo lo nuevo, sin duplicar).
+ * - «rango»: un rango de fechas; sustituye lo traído antes del TPV en esas fechas.
+ * Las marcas solo avanzan si todo se guardó bien.
+ */
 export async function accionAxisSync(_prev: Resultado | null, form: FormData): Promise<Resultado> {
   try {
     const s = await autorizar('integraciones')
     const ds = await cargarDataset()
-    const desde = fecha(form, 'desde')
-    const hasta = fecha(form, 'hasta')
-    if (hasta < desde) throw new Error('El rango de fechas está al revés.')
+    const modo = str(form, 'modo') === 'rango' ? 'rango' : 'novedades'
+    const desde = modo === 'rango' ? fecha(form, 'desde') : undefined
+    const hasta = modo === 'rango' ? fecha(form, 'hasta') : undefined
+    if (desde && hasta && hasta < desde) throw new Error('El rango de fechas está al revés.')
     const tiendas = ds.tiendas.filter((t) => t.codigoTPV)
-    if (!tiendas.length) throw new Error('Ninguna tienda tiene «Código TPV» (ObjectCode) en Catálogos → Tiendas.')
+    if (!tiendas.length) throw new Error('Ninguna tienda tiene asignada su área del TPV (ObjectCode).')
+    const cfg = ds.settings.axispos!
     const c = clienteAxis(ds)
-    await c.autenticar()
     const ops = []
-    for (const t of tiendas) ops.push(...(await c.exportarOperaciones(desde, hasta, String(t.codigoTPV))))
+    const caja = []
+    const marcas: Record<string, { op: number; pago: number; caja: number }> = { ...cfg.marcas }
+    for (const t of tiendas) {
+      const r = await c.exportarOperaciones(String(t.codigoTPV), modo === 'rango' ? { desde, hasta } : { marcas: cfg.marcas?.[t.id] ?? { op: 0, pago: 0, caja: 0 } })
+      ops.push(...r.operaciones)
+      caja.push(...r.caja)
+      if (modo === 'novedades') marcas[t.id] = r.marcas
+    }
     const tabla = prepararTasas(ds.tasas, ds.settings.margenTasa)
-    const { salidas, compras, sinTienda } = mapearOperaciones(ops, ds.tiendas, (f) => tasaVigente(tabla, f)?.cupUsd ?? 0)
+    const m = mapearOperaciones(ops, caja, ds.tiendas, (f) => tasaVigente(tabla, f)?.cupUsd ?? 0, { cobros: Boolean(cfg.cobros), cuentaBanco: cfg.cuentaBanco })
     const loteId = uid()
-    const enRango = (x: { origen?: string; fecha: string }) => x.origen === 'tpv' && x.fecha >= desde && x.fecha <= hasta
-    await mutar({ salidas: [] as Salida[], compras: [] as Compra[], settings: DEFAULT_SETTINGS }, (a) => ({
-      salidas: [...a.salidas.filter((x) => !enRango(x)), ...salidas.map((x) => ({ ...x, id: uid(), lote: loteId }))],
-      compras: [...a.compras.filter((x) => !enRango(x)), ...compras.map((x) => ({ ...x, id: uid(), lote: loteId }))],
-      settings: { ...DEFAULT_SETTINGS, ...a.settings, axispos: { ...a.settings.axispos!, ultimoSync: new Date().toISOString() } },
-    }))
-    await registrarAuditoria([{ usuario: s.email, accion: 'sincronizar', coleccion: 'axispos', detalle: `${desde}…${hasta}: ${ops.length} operaciones, ${salidas.length} salidas, ${compras.length} compras` }])
+    const fechas = [...m.salidas, ...m.compras, ...m.movimientos].map((x) => x.fecha)
+    comprobarMes(s, ds.settings, ...fechas)
+    let nuevas = { salidas: 0, compras: 0, movimientos: 0 }
+    await mutar({ salidas: [] as Salida[], compras: [] as Compra[], movimientos: [] as Movimiento[], settings: DEFAULT_SETTINGS }, (a) => {
+      const marca = <T extends object>(arr: T[]) => arr.map((x) => ({ ...x, id: uid(), lote: loteId }))
+      if (modo === 'rango') {
+        const fuera = (x: { origen?: string; fecha: string }) => !(x.origen === 'tpv' && x.fecha >= desde! && x.fecha <= hasta!)
+        nuevas = { salidas: m.salidas.length, compras: m.compras.length, movimientos: m.movimientos.length }
+        return {
+          salidas: [...a.salidas.filter(fuera), ...marca(m.salidas)],
+          compras: [...a.compras.filter(fuera), ...marca(m.compras)],
+          movimientos: [...a.movimientos.filter(fuera), ...marca(m.movimientos)],
+          settings: { ...DEFAULT_SETTINGS, ...a.settings, axispos: { ...a.settings.axispos!, ultimoSync: new Date().toISOString() } },
+        }
+      }
+      // Novedades: se descartan las operaciones (tienda + ticket + fecha) que ya estén guardadas.
+      const ya = new Set(a.salidas.filter((x) => x.origen === 'tpv').map((x) => `${x.tienda}|${x.operacion}|${x.fecha}`))
+      const yaC = new Set(a.compras.filter((x) => x.origen === 'tpv').map((x) => `${x.tienda}|${x.factura}|${x.fecha}`))
+      const sal = m.salidas.filter((x) => !ya.has(`${x.tienda}|${x.operacion}|${x.fecha}`))
+      const com = m.compras.filter((x) => !yaC.has(`${x.tienda}|${x.factura}|${x.fecha}`))
+      nuevas = { salidas: sal.length, compras: com.length, movimientos: m.movimientos.length }
+      return {
+        salidas: [...a.salidas, ...marca(sal)],
+        compras: [...a.compras, ...marca(com)],
+        movimientos: [...a.movimientos, ...marca(m.movimientos)],
+        settings: { ...DEFAULT_SETTINGS, ...a.settings, axispos: { ...a.settings.axispos!, ultimoSync: new Date().toISOString(), marcas } },
+      }
+    })
+    const ign = [...m.ignorados.entries()].map(([k, v]) => `${v} ${k}`).join(', ')
+    await registrarAuditoria([{ usuario: s.email, accion: 'sincronizar', coleccion: 'axispos', detalle: `${modo}${desde ? ` ${desde}…${hasta}` : ''}: ${ops.length} operaciones, ${caja.length} asientos de caja → ${JSON.stringify(nuevas)}` }])
     refrescar()
-    return { ok: true, mensaje: `${ops.length} operaciones del TPV: ${salidas.length} líneas de venta/salida y ${compras.length} de compra.${sinTienda ? ` ${sinTienda} de áreas sin tienda asignada.` : ''}` }
+    return {
+      ok: true,
+      mensaje: `${ops.length} operaciones del TPV: ${nuevas.salidas} líneas de venta/salida, ${nuevas.compras} de compra y ${nuevas.movimientos} movimientos de caja/banco.${m.sinTienda ? ` ${m.sinTienda} de áreas sin tienda.` : ''}${ign ? ` No contabilizadas todavía: ${ign}.` : ''}`,
+    }
   } catch (e) {
     return fallo(e)
   }

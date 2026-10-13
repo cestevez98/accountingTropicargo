@@ -16,7 +16,7 @@ Diseño tomado del prototipo de Figma Make «Kaluch Accounting» (navy/esmeralda
   - Al cerrar cada mes se declara como dividendo la parte del beneficio que no se reinvierte.
 - La **categoría** decide todo (Catálogos → Categorías): renglón del ER, cuenta de balance y grupo del flujo.
 - **Importar**: valida antes de guardar (categorías, tasa del día, duplicados, saltos de consecutivo), deja importar solo las filas válidas y se puede deshacer. Los archivos grandes (> 3,5 MB) se suben directo a Vercel Blob desde el navegador.
-- **AxisPOS / Microinvest** (`lib/axispos.ts`): `ExportOperations` por área (ObjectCode) → ventas, mermas, consumo, devoluciones y compras. Se activa poniendo la URL y el usuario en Integraciones, `AXISPOS_PASSWORD` en Vercel y el «Código TPV» de cada tienda.
+- **AxisPOS / AxisCloud** (`lib/axispos.ts`, SyncApi v2.1 de https://doc.axissoft.cloud/api/): token de 24 h reutilizado, GZIP detectado por los primeros bytes, estado del cuerpo comprobado aunque llegue un 200. `ExportOperations` por área (ObjectCode) con las tres marcas de agua → ventas, mermas, consumo, devoluciones, compras, cobros (opcional) y gastos/ingresos de caja (CashbookSyncs). También lee las áreas (`ImportExportLocations`) y el catálogo de mercancías (`ImportExportItems`). Se activa con la dirección del tenant y el usuario en Integraciones, `AXISPOS_PASSWORD` en Vercel y el área de cada tienda.
 
 ## Diferencias con el Excel KM-26 (ver Reportes → Comparación con el Excel)
 

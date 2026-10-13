@@ -219,7 +219,19 @@ export interface Settings {
   margenMinimo: number
   pctReinversionDefecto: number
   pctInversionistaDefecto: number
-  axispos?: { url: string; usuario: string; ultimoSync?: string; objectCodes?: string }
+  axispos?: {
+    url: string
+    usuario: string
+    ultimoSync?: string
+    /** Registrar los cobros de las ventas del TPV en caja/banco (si no, se siguen anotando a mano). */
+    cobros?: boolean
+    /** Cuenta bancaria a la que van los cobros por transferencia o tarjeta. */
+    cuentaBanco?: string
+    /** Marcas de agua de ExportOperations por tienda. */
+    marcas?: Record<string, { op: number; pago: number; caja: number }>
+    /** Áreas que devolvió la central la última vez (para asignarlas a las tiendas). */
+    ubicaciones?: { code: string; nombre: string }[]
+  }
   mesesCerrados: string[]
 }
 
