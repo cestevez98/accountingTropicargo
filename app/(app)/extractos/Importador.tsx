@@ -2,7 +2,7 @@
 
 import { useRouter } from 'next/navigation'
 import { useMemo, useState, useTransition } from 'react'
-import { confirmarExtracto, prepararExtracto, type DatosExtracto } from '@/app/acciones'
+import { confirmarExtracto, prepararExtracto, traerPayPal, type DatosExtracto } from '@/app/acciones'
 import {
   FORMATOS,
   FORMATO_OFX,
@@ -28,7 +28,15 @@ const fmt = (n: number | undefined) => (n == null || !Number.isFinite(n) ? '—'
 
 type Vista = 'nuevas' | 'distintas' | 'registradas' | 'sistema' | 'errores'
 
-export function ImportadorExtractos({ cuentas, categorias }: { cuentas: string[]; categorias: { grupo: string; nombres: string[] }[] }) {
+export function ImportadorExtractos({
+  cuentas,
+  categorias,
+  paypalApi,
+}: {
+  cuentas: string[]
+  categorias: { grupo: string; nombres: string[] }[]
+  paypalApi: boolean
+}) {
   const router = useRouter()
   const [cuenta, setCuenta] = useState('')
   const [archivo, setArchivo] = useState<{ nombre: string; tabla: Tabla } | null>(null)
@@ -56,27 +64,54 @@ export function ImportadorExtractos({ cuentas, categorias }: { cuentas: string[]
     else setMsg({ ok: false, t: r.error })
   }
 
+  const [rangoApi, setRangoApi] = useState({ desde: new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10), hasta: new Date().toISOString().slice(0, 10) })
+  const [trayendo, startApi] = useTransition()
+
+  function traerDePayPal() {
+    setMsg(null)
+    startApi(async () => {
+      const r = await traerPayPal(rangoApi.desde, rangoApi.hasta)
+      if (!r.ok) return setMsg({ ok: false, t: r.error })
+      if (!r.tabla.filas.length) return setMsg({ ok: false, t: 'PayPal no devolvió movimientos en ese período.' })
+      cargarTabla(`PayPal API ${rangoApi.desde} a ${rangoApi.hasta}`, r.tabla)
+    })
+  }
+
   async function elegirArchivo(f: File) {
     setMsg(null)
     try {
-      const tabla = leerArchivo(f.name, await f.arrayBuffer())
+      cargarTabla(f.name, leerArchivo(f.name, await f.arrayBuffer()))
+    } catch (e) {
+      setMsg({ ok: false, t: `No se pudo leer el archivo: ${e instanceof Error ? e.message : e}` })
+    }
+  }
+
+  function cargarTabla(nombre: string, tabla: Tabla) {
+    {
       const det = detectarFormato(tabla)
-      setArchivo({ nombre: f.name, tabla })
+      setArchivo({ nombre, tabla })
       aplicarFormato(tabla, det)
       setCats({})
       setRecordar({})
       setExcluir({})
       setCorregir({})
       setBorrar({})
+      const conSaldo = tabla.saldoFinal
+        ? null
+        : convertir(tabla, mapear(tabla, det), { fecha: det?.fecha ?? 'MDY', invertir: det?.invertir, descartarEstados: det?.descartarEstados, impacto: det?.impacto })
+            .filter((l) => l.saldo != null && l.fecha && !l.error)
+            .reduce<Linea | null>((ult, l) => (!ult || l.fecha >= ult.fecha ? l : ult), null)
       if (tabla.saldoFinal) {
         setSaldoBanco(String(tabla.saldoFinal.importe))
         setFechaSaldo(tabla.saldoFinal.fecha)
+      } else if (conSaldo) {
+        // El archivo trae el saldo en cada línea (PayPal, Bank of America…): se toma el de la última.
+        setSaldoBanco(String(conSaldo.saldo))
+        setFechaSaldo(conSaldo.fecha)
       } else {
         setSaldoBanco('')
         setFechaSaldo('')
       }
-    } catch (e) {
-      setMsg({ ok: false, t: `No se pudo leer el archivo: ${e instanceof Error ? e.message : e}` })
     }
   }
 
@@ -90,7 +125,7 @@ export function ImportadorExtractos({ cuentas, categorias }: { cuentas: string[]
   // Análisis: líneas, duplicadas, importes distintos y categoría sugerida.
   const analisis = useMemo(() => {
     if (!archivo || !datos) return null
-    const lineas = convertir(archivo.tabla, mapeo, { fecha: fechaFmt, invertir, descartarEstados: formato?.descartarEstados })
+    const lineas = convertir(archivo.tabla, mapeo, { fecha: fechaFmt, invertir, descartarEstados: formato?.descartarEstados, impacto: formato?.impacto })
     const usados = new Set<string>()
     const dup = marcarDuplicados(lineas, datos.existentes, usados)
     const dif = marcarDiferencias(lineas, datos.existentes, dup, usados)
@@ -198,6 +233,23 @@ export function ImportadorExtractos({ cuentas, categorias }: { cuentas: string[]
           />
           {!cuenta && <p className="mt-1 text-xs text-slate-400">Elige primero la cuenta.</p>}
         </div>
+        {cuenta === 'PayPal' && (
+          <div className="flex flex-wrap items-end gap-3 rounded-md bg-marca-50 p-3 md:col-span-3">
+            <div className="text-sm font-medium text-marca-900">…o tráelo directamente de PayPal (API):</div>
+            <div>
+              <label className="etiqueta">Desde</label>
+              <input type="date" className="input" value={rangoApi.desde} onChange={(e) => setRangoApi({ ...rangoApi, desde: e.target.value })} />
+            </div>
+            <div>
+              <label className="etiqueta">Hasta</label>
+              <input type="date" className="input" value={rangoApi.hasta} onChange={(e) => setRangoApi({ ...rangoApi, hasta: e.target.value })} />
+            </div>
+            <button className="btn btn-primario" disabled={!paypalApi || trayendo} onClick={traerDePayPal}>
+              {trayendo ? 'Consultando PayPal…' : 'Traer de PayPal'}
+            </button>
+            {!paypalApi && <span className="text-xs text-slate-500">Falta configurar las credenciales «Live» de la app de PayPal.</span>}
+          </div>
+        )}
       </section>
 
       {msg && <p className={`rounded-md px-3 py-2 text-sm ${msg.ok ? 'bg-emerald-50 text-emerald-800' : 'bg-red-50 text-red-700'}`}>{msg.t}</p>}

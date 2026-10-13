@@ -822,3 +822,17 @@ export async function guardarAjustesRemesas(pct: number, agentes: string[]): Pro
     return fallo(e)
   }
 }
+
+// ---------------------------------------------------------------- PayPal (API)
+
+export async function traerPayPal(desde: string, hasta: string): Promise<{ ok: true; tabla: import('@/lib/extractos').Tabla } | { ok: false; error: string }> {
+  try {
+    await autorizar(['admin', 'contador'])
+    if (!esFecha(desde) || !esFecha(hasta) || desde > hasta) throw new Error('Rango de fechas inválido.')
+    if ((Date.parse(hasta) - Date.parse(desde)) / 86400000 > 400) throw new Error('Como máximo 400 días por consulta.')
+    const { transaccionesPayPal } = await import('@/lib/paypal')
+    return { ok: true, tabla: await transaccionesPayPal(desde, hasta) }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}

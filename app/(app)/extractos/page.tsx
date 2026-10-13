@@ -2,6 +2,7 @@ import { Encabezado } from '@/components/ui'
 import { requerirUsuario } from '@/lib/auth'
 import { cargarDataset } from '@/lib/data'
 import { opcionesFormulario } from '@/lib/opciones'
+import { paypalConfigurado } from '@/lib/paypal'
 import { ImportadorExtractos } from './Importador'
 
 export const maxDuration = 60
@@ -16,7 +17,7 @@ export default async function ExtractosPage() {
         titulo="Importar extracto bancario"
         descripcion="Sube el archivo que descargas de la banca online. El sistema reconoce el formato, descarta lo que ya está registrado, detecta importes que no coinciden con el banco y propone la categoría de cada movimiento nuevo. Nada se guarda hasta que confirmas."
       />
-      <ImportadorExtractos cuentas={cuentas} categorias={opcionesFormulario(ds, s).categorias} />
+      <ImportadorExtractos cuentas={cuentas} categorias={opcionesFormulario(ds, s).categorias} paypalApi={paypalConfigurado()} />
     </>
   )
 }

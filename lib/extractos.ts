@@ -34,6 +34,11 @@ export interface Formato {
   invertir?: boolean
   /** Estados a descartar (p. ej. PayPal «Denied»). */
   descartarEstados?: string[]
+  /**
+   * Columna que dice si la línea mueve el saldo: solo se usan las líneas cuyo valor está en `incluir`.
+   * PayPal: «Repercusiones en el saldo» = Crédito / Cargo; descarta los artículos del carrito, autorizaciones y notas.
+   */
+  impacto?: { columnas: string[]; incluir: string[] }
 }
 
 export const FORMATOS: Formato[] = [
@@ -53,7 +58,8 @@ export const FORMATOS: Formato[] = [
       estado: ['status', 'estado'],
     },
     fecha: 'MDY',
-    descartarEstados: ['denied', 'denegado', 'rechazado', 'canceled', 'cancelado', 'reversed'],
+    descartarEstados: ['denied', 'denegado', 'declinado', 'rechazado', 'canceled', 'cancelado', 'reversed'],
+    impacto: { columnas: ['repercusiones en el saldo', 'balance impact', 'impacto en el saldo'], incluir: ['crédito', 'credito', 'cargo', 'débito', 'debito', 'credit', 'debit'] },
   },
   {
     id: 'revolut',
@@ -326,10 +332,17 @@ function iso(y: number, m: number, d: number): string | null {
   return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`
 }
 
-export function convertir(t: Tabla, m: Mapeo, opciones: { fecha: FormatoFecha; invertir?: boolean; descartarEstados?: string[] }): Linea[] {
+export function convertir(
+  t: Tabla,
+  m: Mapeo,
+  opciones: { fecha: FormatoFecha; invertir?: boolean; descartarEstados?: string[]; impacto?: Formato['impacto'] },
+): Linea[] {
   const out: Linea[] = []
   const val = (r: unknown[], rol: Rol) => (m[rol] != null ? r[m[rol]!] : undefined)
+  const h = t.encabezados.map(norm)
+  const iImpacto = opciones.impacto ? h.findIndex((x) => opciones.impacto!.columnas.includes(x)) : -1
   t.filas.forEach((r, n) => {
+    if (iImpacto >= 0 && !opciones.impacto!.incluir.includes(norm(r[iImpacto]))) return
     const estado = norm(val(r, 'estado'))
     if (estado && opciones.descartarEstados?.some((e) => estado.includes(e))) return
     const fecha = parseFecha(val(r, 'fecha'), opciones.fecha)
@@ -346,7 +359,7 @@ export function convertir(t: Tabla, m: Mapeo, opciones: { fecha: FormatoFecha; i
     if (opciones.invertir) importe = -importe
     const concepto = String(val(r, 'concepto') ?? '').replace(/\s+/g, ' ').trim()
     const detalle = String(val(r, 'detalle') ?? '').replace(/\s+/g, ' ').trim()
-    const mon = String(val(r, 'moneda') ?? 'USD').toUpperCase().trim()
+    const mon = String(val(r, 'moneda') ?? 'USD').toUpperCase().trim() || 'USD'
     const saldo = parseImporte(val(r, 'saldo'))
     const extra: Record<string, string | number> = {}
     if (detalle) extra.Detalle = detalle
@@ -365,7 +378,8 @@ export function convertir(t: Tabla, m: Mapeo, opciones: { fecha: FormatoFecha; i
       saldo: Number.isFinite(saldo) ? saldo : undefined,
       extra,
     }
-    if (!fecha) linea.error = 'Fecha no reconocida'
+    if (!['USD', 'EUR', 'CUP'].includes(mon)) linea.error = `Moneda ${mon}: no se importa (la cuenta lleva USD; la conversión aparece en su propia línea en USD)`
+    else if (!fecha) linea.error = 'Fecha no reconocida'
     else if (!Number.isFinite(importe)) linea.error = 'Importe no reconocido'
     else if (importe === 0) linea.error = 'Importe 0'
     out.push(linea)
@@ -403,10 +417,17 @@ export function marcarDuplicados(lineas: Linea[], existentes: Existente[], usado
   existentes.forEach((e, i) => {
     if (e.referencia) porRef.set(e.referencia, [...(porRef.get(e.referencia) ?? []), i])
   })
+  // Referencias recortadas (p. ej. el Excel guardaba solo 12 caracteres del Id. de PayPal): se comparan por prefijo.
+  const recortadas = existentes.map((e, i) => [e.referencia, i] as const).filter(([r]) => r && r.length >= 10) as [string, number][]
+  const buscarRef = (ref: string, importe: number) =>
+    porRef.get(ref)?.find((j) => !usados.has(j) && Math.abs(existentes[j].importe - importe) < 0.01) ??
+    (ref.length >= 10
+      ? recortadas.find(([r, j]) => !usados.has(j) && (ref.startsWith(r) || r.startsWith(ref)) && Math.abs(existentes[j].importe - importe) < 0.01)?.[1]
+      : undefined)
   // Primero las coincidencias por referencia (las más seguras).
   for (const l of lineas) {
     if (!l.referencia) continue
-    const i = porRef.get(l.referencia)?.find((j) => !usados.has(j) && Math.abs(existentes[j].importe - l.importe) < 0.01)
+    const i = buscarRef(l.referencia, l.importe)
     if (i != null) {
       usados.add(i)
       dup.add(l.n)
