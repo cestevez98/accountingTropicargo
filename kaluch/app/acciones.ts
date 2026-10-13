@@ -808,6 +808,8 @@ function clienteAxis(ds: Dataset) {
 }
 
 /** Comprueba la conexión y trae las áreas del tenant para asignarlas a las tiendas. */
+const AREA_CENTRAL = '1'
+
 export async function accionAxisProbar(_prev?: Resultado | null, _f?: FormData): Promise<Resultado> {
   try {
     const s = await autorizar('integraciones')
@@ -815,6 +817,8 @@ export async function accionAxisProbar(_prev?: Resultado | null, _f?: FormData):
     const c = clienteAxis(ds0)
     await c.comprobar()
     const ubic = (await c.ubicaciones()).filter((u) => !u.DeletedDb).map((u) => ({ code: String(u.Code), nombre: u.Name, grupo: u.Group, tipo: u.Type }))
+    // El área 1 (ALMACEN CENTRAL KM) nunca viaja en el catálogo de ubicaciones, pero existe: es el almacén central.
+    if (!ubic.some((u) => u.code === AREA_CENTRAL)) ubic.unshift({ code: AREA_CENTRAL, nombre: 'ALMACEN CENTRAL KM', grupo: 'CENTRAL', tipo: 3 })
     const proveedores = (await c.socios()).filter((p) => /prov/i.test(p.Group ?? '')).map((p) => ({ code: String(p.Code), nombre: p.Name }))
     const usuarios = await c.usuarios().catch(() => [])
     const usuarioCodigo = usuarios.find((u) => u.Name?.toLowerCase() === (ds0.settings.axispos?.usuario ?? '').toLowerCase())?.Code
@@ -825,7 +829,7 @@ export async function accionAxisProbar(_prev?: Resultado | null, _f?: FormData):
       return {
         settings: { ...DEFAULT_SETTINGS, ...settings, axispos: { ...settings.axispos!, ubicaciones: ubic, proveedores, ...(settings.axispos?.usuarioCodigo || !usuarioCodigo ? {} : { usuarioCodigo: String(usuarioCodigo) }) } },
         tiendas: [...tiendas, ...DEFECTOS.tiendas.filter((d) => !tiendas.some((t) => t.id === d.id))].map((t) => {
-          const codigos = prop.get(t.id)
+          const codigos = t.tipo === 'almacen' ? [AREA_CENTRAL] : prop.get(t.id)
           if (t.codigoTPV || !codigos) return t
           asignadas++
           return { ...t, codigoTPV: codigos.join(',') }
