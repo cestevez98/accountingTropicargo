@@ -26,6 +26,8 @@ function enlaceOrigen(l: Linea): string {
       return `/registros/asientos?id=${q(l.ref)}`
     case 'dep':
       return `/registros/activos?id=${q(l.ref)}`
+    case 'rem':
+      return `/remesas?id=${q(l.ref)}`
     default:
       return '/apertura'
   }

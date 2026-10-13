@@ -11,9 +11,10 @@ const ROLES: { v: Rol; l: string }[] = [
   { v: 'contador', l: 'Contador' },
   { v: 'cajero', l: 'Cajero' },
   { v: 'lectura', l: 'Solo lectura' },
+  { v: 'agente', l: 'Agente de remesas (p. ej. DVA)' },
 ]
 
-export function GestionUsuarios({ usuarios, cuentas, yo }: { usuarios: U[]; cuentas: string[]; yo: string }) {
+export function GestionUsuarios({ usuarios, cuentas, agentes, yo }: { usuarios: U[]; cuentas: string[]; agentes: string[]; yo: string }) {
   const [editando, setEditando] = useState<U | 'nuevo' | null>(null)
   return (
     <div className="space-y-4">
@@ -27,7 +28,7 @@ export function GestionUsuarios({ usuarios, cuentas, yo }: { usuarios: U[]; cuen
               <th>Nombre</th>
               <th>Correo</th>
               <th>Rol</th>
-              <th>Cajas (cajero)</th>
+              <th>Cajas / agente</th>
               <th>Activo</th>
               <th />
             </tr>
@@ -41,7 +42,7 @@ export function GestionUsuarios({ usuarios, cuentas, yo }: { usuarios: U[]; cuen
                 </td>
                 <td>{u.email}</td>
                 <td>{ROLES.find((r) => r.v === u.rol)?.l}</td>
-                <td>{u.rol === 'cajero' ? u.cuentas?.join(', ') : ''}</td>
+                <td>{u.rol === 'cajero' ? u.cuentas?.join(', ') : u.rol === 'agente' ? `Agente: ${u.agente ?? '—'}` : ''}</td>
                 <td>{u.activo ? 'Sí' : 'No'}</td>
                 <td className="text-right">
                   <button className="text-marca-600 hover:underline" onClick={() => setEditando(u)}>
@@ -53,12 +54,12 @@ export function GestionUsuarios({ usuarios, cuentas, yo }: { usuarios: U[]; cuen
           </tbody>
         </table>
       </div>
-      {editando && <FormUsuario u={editando === 'nuevo' ? null : editando} cuentas={cuentas} onCerrar={() => setEditando(null)} />}
+      {editando && <FormUsuario u={editando === 'nuevo' ? null : editando} cuentas={cuentas} agentes={agentes} onCerrar={() => setEditando(null)} />}
     </div>
   )
 }
 
-function FormUsuario({ u, cuentas, onCerrar }: { u: U | null; cuentas: string[]; onCerrar: () => void }) {
+function FormUsuario({ u, cuentas, agentes, onCerrar }: { u: U | null; cuentas: string[]; agentes: string[]; onCerrar: () => void }) {
   const router = useRouter()
   const [rol, setRol] = useState<Rol>(u?.rol ?? 'contador')
   const [error, setError] = useState<string | null>(null)
@@ -78,6 +79,7 @@ function FormUsuario({ u, cuentas, onCerrar }: { u: U | null; cuentas: string[];
               rol,
               activo: fd.get('activo') === 'on',
               cuentas: fd.getAll('cuentas').map(String),
+              agente: rol === 'agente' ? String(fd.get('agente') ?? '') : undefined,
               password: String(fd.get('password') || '') || undefined,
             })
             if (!r.ok) return setError(r.error)
@@ -119,6 +121,17 @@ function FormUsuario({ u, cuentas, onCerrar }: { u: U | null; cuentas: string[];
                 </label>
               ))}
             </div>
+          </div>
+        )}
+        {rol === 'agente' && (
+          <div className="sm:col-span-2">
+            <label className="etiqueta">Agente</label>
+            <select name="agente" defaultValue={u?.agente ?? agentes[0]} className="input">
+              {agentes.map((a) => (
+                <option key={a}>{a}</option>
+              ))}
+            </select>
+            <p className="mt-1 text-xs text-slate-400">Solo verá las remesas de este agente y podrá marcarlas como entregadas. No ve nada de la contabilidad.</p>
           </div>
         )}
         <label className="flex items-center gap-2 text-sm">

@@ -21,6 +21,7 @@ export const DEFECTOS: Dataset = {
   devengos: [],
   asientos: [],
   reglas: [],
+  remesas: [],
 }
 
 /** Colecciones de datos operativos (lo que se vacía al borrar los datos de prueba). */

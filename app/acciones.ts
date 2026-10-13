@@ -345,13 +345,15 @@ export async function vaciarDatos(confirmacion: string): Promise<Resultado> {
 
 export async function guardarUsuario(
   id: string | null,
-  v: { email: string; nombre: string; rol: Rol; activo: boolean; cuentas: string[]; password?: string },
+  v: { email: string; nombre: string; rol: Rol; activo: boolean; cuentas: string[]; agente?: string; password?: string },
 ): Promise<Resultado> {
   try {
     const s = await autorizar(['admin'])
     const email = v.email.trim().toLowerCase()
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error('Correo inválido.')
-    if (!['admin', 'contador', 'cajero', 'lectura'].includes(v.rol)) throw new Error('Rol inválido.')
+    if (!['admin', 'contador', 'cajero', 'lectura', 'agente'].includes(v.rol)) throw new Error('Rol inválido.')
+    if (v.rol === 'agente' && !v.agente) throw new Error('Elige a qué agente pertenece el usuario.')
+    const agente = v.rol === 'agente' ? v.agente : undefined
     if (!id && (!v.password || v.password.length < 10)) throw new Error('La contraseña debe tener al menos 10 caracteres.')
     if (v.password && v.password.length < 10) throw new Error('La contraseña debe tener al menos 10 caracteres.')
     const hash = v.password ? await hashPassword(v.password) : undefined
@@ -362,9 +364,9 @@ export async function guardarUsuario(
         const u = usuarios.find((x) => x.id === id)
         if (!u) throw new Error('El usuario no existe.')
         if (u.id === s.id && (v.rol !== 'admin' || !v.activo)) throw new Error('No puedes quitarte a ti mismo el rol de administrador ni desactivarte.')
-        return { usuarios: usuarios.map((x) => (x.id === id ? { ...x, email, nombre: v.nombre.trim(), rol: v.rol, activo: v.activo, cuentas: cuentasValidas, ...(hash ? { hash } : {}) } : x)) }
+        return { usuarios: usuarios.map((x) => (x.id === id ? { ...x, email, nombre: v.nombre.trim(), rol: v.rol, activo: v.activo, cuentas: cuentasValidas, agente, ...(hash ? { hash } : {}) } : x)) }
       }
-      return { usuarios: [...usuarios, { id: crypto.randomUUID(), email, nombre: v.nombre.trim(), rol: v.rol, activo: v.activo, cuentas: cuentasValidas, hash: hash! }] }
+      return { usuarios: [...usuarios, { id: crypto.randomUUID(), email, nombre: v.nombre.trim(), rol: v.rol, activo: v.activo, cuentas: cuentasValidas, agente, hash: hash! }] }
     })
     await registrarAuditoria([{ usuario: s.email, accion: id ? 'editar' : 'crear', coleccion: 'usuarios', detalle: `${email} (${v.rol})` }])
     refrescar()
@@ -603,6 +605,219 @@ export async function guardarEurCaja(valor: number): Promise<Resultado> {
     await registrarAuditoria([{ usuario: s.email, accion: 'editar', coleccion: 'settings', detalle: `EUR en caja = ${valor} USD` }])
     refrescar()
     return { ok: true, mensaje: `El euro en caja vale ahora ${valor} USD.` }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+// ---------------------------------------------------------------- remesas
+
+type Remesa = import('@/lib/types').Remesa
+
+/** Categorías que necesita el módulo de remesas; se crean si el catálogo guardado no las tiene. */
+async function asegurarCategoriasRemesas(categorias: Categoria[]): Promise<Categoria[] | null> {
+  const { DEFAULT_CATEGORIAS } = await import('@/lib/catalog')
+  const faltan = ['Comisiones de remesas', 'Pago a agentes de remesas']
+    .filter((n) => !categorias.some((c) => c.nombre === n))
+    .map((n) => ({ ...DEFAULT_CATEGORIAS.find((c) => c.nombre === n)!, id: `cat-${crypto.randomUUID()}` }))
+  const remesa = categorias.find((c) => c.nombre === 'Remesa')
+  const corregir = remesa && remesa.contrapartida === 'fondos_terceros'
+  if (!faltan.length && !corregir) return null
+  return [...categorias.map((c) => (c.nombre === 'Remesa' && corregir ? { ...c, contrapartida: 'remesas' as const } : c)), ...faltan]
+}
+
+const r2 = (n: number) => Math.round(n * 100) / 100
+
+export async function guardarRemesa(id: string | null, v: Record<string, unknown>): Promise<Resultado> {
+  try {
+    const s = await autorizar(['admin', 'contador', 'cajero'])
+    let numero = ''
+    await mutar({ remesas: [] as Remesa[], settings: DEFAULT_SETTINGS, categorias: DEFECTOS.categorias, cuentas: DEFECTOS.cuentas }, async ({ remesas, settings, categorias, cuentas }) => {
+      const previo = id ? remesas.find((r) => r.id === id) : undefined
+      if (id && !previo) throw new Error('La remesa ya no existe.')
+      if (previo?.liquidacion && s.rol !== 'admin') throw new Error('Esta remesa ya se le pagó al agente: solo el administrador puede modificarla.')
+      const txt = (k: string, req = false) => {
+        const x = String(v[k] ?? '').trim()
+        if (req && !x) throw new Error(`Falta «${k}».`)
+        return x || undefined
+      }
+      const num = (k: string) => {
+        const x = Number(String(v[k] ?? '').replace(',', '.'))
+        return Number.isFinite(x) ? x : NaN
+      }
+      const fecha = txt('fecha', true)!
+      if (!esFecha(fecha)) throw new Error('Fecha inválida.')
+      if (s.rol !== 'admin' && settings.mesesCerrados.includes(fecha.slice(0, 7))) throw new Error('Ese mes está cerrado.')
+      const monto = num('monto')
+      if (!(monto > 0)) throw new Error('El monto debe ser mayor que 0.')
+      const pct = Number(settings.comisionRemesasPct ?? 10)
+      const comision = String(v.comision ?? '') === '' ? r2((monto * pct) / 100) : num('comision')
+      if (!(comision >= 0)) throw new Error('Comisión inválida.')
+      const monedaEntrega = (txt('monedaEntrega') ?? 'USD') as Remesa['monedaEntrega']
+      if (!['USD', 'CUP', 'MLC', 'EUR'].includes(monedaEntrega)) throw new Error('Moneda de entrega inválida.')
+      const tasa = num('tasaEntrega')
+      if (monedaEntrega === 'CUP' && !(tasa > 0)) throw new Error('Indica la tasa de entrega en CUP.')
+      const montoEntregar = monedaEntrega === 'CUP' ? Math.round(monto * tasa) : monto
+      const { AGENTE_PROPIO } = await import('@/lib/ledger')
+      const agente = txt('agente', true)!
+      if (agente !== AGENTE_PROPIO && !(settings.agentesRemesas ?? DEFAULT_SETTINGS.agentesRemesas).includes(agente)) throw new Error('Agente desconocido.')
+      const cuentaCobro = txt('cuentaCobro')
+      if (cuentaCobro && !cuentas.some((c) => c.nombre === cuentaCobro)) throw new Error('Cuenta de cobro desconocida.')
+      if (!previo) {
+        const max = remesas.reduce((m, r) => Math.max(m, Number(r.numero.replace(/\D/g, '')) || 0), 0)
+        numero = `R-${String(max + 1).padStart(6, '0')}`
+      } else numero = previo.numero
+      const r: Remesa = {
+        ...(previo ?? { estado: 'pendiente' as const, creadoPor: s.email }),
+        id: previo?.id ?? crypto.randomUUID(),
+        numero,
+        fecha,
+        remitente: txt('remitente', true)!,
+        remitenteTelefono: txt('remitenteTelefono'),
+        beneficiario: txt('beneficiario', true)!,
+        beneficiarioTelefono: txt('beneficiarioTelefono'),
+        beneficiarioCI: txt('beneficiarioCI'),
+        direccion: txt('direccion'),
+        provincia: txt('provincia'),
+        monto: r2(monto),
+        comision: r2(comision),
+        monedaEntrega,
+        ...(monedaEntrega === 'CUP' ? { tasaEntrega: tasa } : { tasaEntrega: undefined }),
+        montoEntregar,
+        cuentaCobro,
+        agente,
+        notas: txt('notas'),
+      }
+      if (r.estado === 'pendiente' && agente) r.estado = 'asignada'
+      const nuevasCats = await asegurarCategoriasRemesas(categorias)
+      return { remesas: previo ? remesas.map((x) => (x.id === r.id ? r : x)) : [r, ...remesas], ...(nuevasCats ? { categorias: nuevasCats } : {}) }
+    })
+    await registrarAuditoria([{ usuario: s.email, accion: id ? 'editar' : 'crear', coleccion: 'remesas', registroId: id ?? undefined, detalle: numero }])
+    refrescar()
+    return { ok: true, mensaje: id ? `Remesa ${numero} guardada.` : `Remesa ${numero} creada.` }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+/** Marca una remesa como entregada. Los agentes solo pueden marcar las suyas. Las fotos llegan comprimidas desde el navegador (data URL). */
+export async function entregarRemesa(id: string, fechaEntrega: string, comprobante: string, fotos: string[]): Promise<Resultado> {
+  try {
+    const s = await autorizar(['admin', 'contador', 'cajero', 'agente'])
+    if (!esFecha(fechaEntrega)) throw new Error('Fecha de entrega inválida.')
+    if (fotos.length > 4) throw new Error('Como máximo 4 fotos.')
+    const { guardarArchivo, leer } = await import('@/lib/store')
+    const actual = (await leer<Remesa[]>('remesas', [])).find((r) => r.id === id)
+    if (!actual) throw new Error('La remesa no existe.')
+    if (s.rol === 'agente' && actual.agente !== s.agente) throw new Error('Esta remesa no es tuya.')
+    const rutas: string[] = []
+    for (const f of fotos) {
+      const m = f.match(/^data:(image\/(?:jpeg|png|webp));base64,(.+)$/)
+      if (!m) throw new Error('Formato de foto no válido.')
+      const buf = Buffer.from(m[2], 'base64')
+      if (buf.length > 1_500_000) throw new Error('Una foto es demasiado grande.')
+      rutas.push(await guardarArchivo(`remesas/${id}/${crypto.randomUUID()}.${m[1] === 'image/png' ? 'png' : 'jpg'}`, buf, m[1]))
+    }
+    await mutar({ remesas: [] as Remesa[] }, ({ remesas }) => {
+      const r = remesas.find((x) => x.id === id)
+      if (!r) throw new Error('La remesa no existe.')
+      if (r.estado === 'cancelada') throw new Error('La remesa está cancelada.')
+      if (s.rol === 'agente' && r.agente !== s.agente) throw new Error('Esta remesa no es tuya.')
+      if (r.liquidacion) throw new Error('La remesa ya está liquidada.')
+      const nueva: Remesa = { ...r, estado: 'entregada', fechaEntrega, comprobante: comprobante.trim() || r.comprobante, fotos: [...(r.fotos ?? []), ...rutas] }
+      return { remesas: remesas.map((x) => (x.id === id ? nueva : x)) }
+    })
+    await registrarAuditoria([{ usuario: s.email, accion: 'editar', coleccion: 'remesas', registroId: id, detalle: `${actual.numero} entregada el ${fechaEntrega}` }])
+    refrescar()
+    return { ok: true, mensaje: `Remesa ${actual.numero} marcada como entregada.` }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+export async function cambiarEstadoRemesa(id: string, estado: 'asignada' | 'cancelada'): Promise<Resultado> {
+  try {
+    const s = await autorizar(['admin', 'contador'])
+    let numero = ''
+    await mutar({ remesas: [] as Remesa[] }, ({ remesas }) => {
+      const r = remesas.find((x) => x.id === id)
+      if (!r) throw new Error('La remesa no existe.')
+      if (r.liquidacion) throw new Error('La remesa ya está liquidada al agente.')
+      numero = r.numero
+      const nueva: Remesa = estado === 'asignada' ? { ...r, estado, fechaEntrega: undefined } : { ...r, estado }
+      return { remesas: remesas.map((x) => (x.id === id ? nueva : x)) }
+    })
+    await registrarAuditoria([{ usuario: s.email, accion: 'editar', coleccion: 'remesas', registroId: id, detalle: `${numero} → ${estado}` }])
+    refrescar()
+    return { ok: true, mensaje: estado === 'cancelada' ? `Remesa ${numero} cancelada.` : `Remesa ${numero} reabierta.` }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+/** Paga al agente las remesas entregadas: crea la salida de dinero y las marca como liquidadas. */
+export async function liquidarAgente(agente: string, ids: string[], cuenta: string, fecha: string): Promise<Resultado> {
+  try {
+    const s = await autorizar(['admin', 'contador'])
+    if (!esFecha(fecha)) throw new Error('Fecha inválida.')
+    if (!ids.length) throw new Error('Elige al menos una remesa.')
+    let total = 0
+    const movId = crypto.randomUUID()
+    await mutar(
+      { remesas: [] as Remesa[], movimientos: [] as import('@/lib/types').Movimiento[], cuentas: DEFECTOS.cuentas, categorias: DEFECTOS.categorias, settings: DEFAULT_SETTINGS },
+      async ({ remesas, movimientos, cuentas, categorias, settings }) => {
+        if (!cuentas.some((c) => c.nombre === cuenta)) throw new Error('Cuenta desconocida.')
+        if (s.rol !== 'admin' && settings.mesesCerrados.includes(fecha.slice(0, 7))) throw new Error('Ese mes está cerrado.')
+        const set = new Set(ids)
+        const elegidas = remesas.filter((r) => set.has(r.id))
+        if (elegidas.length !== ids.length) throw new Error('Alguna remesa ya no existe.')
+        for (const r of elegidas) {
+          if (r.agente !== agente) throw new Error(`${r.numero} no es de ${agente}.`)
+          if (r.estado !== 'entregada') throw new Error(`${r.numero} no está entregada.`)
+          if (r.liquidacion) throw new Error(`${r.numero} ya estaba liquidada.`)
+        }
+        total = r2(elegidas.reduce((a, r) => a + r.monto, 0))
+        const mov: import('@/lib/types').Movimiento = {
+          id: movId,
+          fecha,
+          cuenta,
+          categoria: 'Pago a agentes de remesas',
+          concepto: `Liquidación de ${elegidas.length} remesas a ${agente} (${elegidas[0].numero}…${elegidas.at(-1)!.numero})`,
+          moneda: 'USD',
+          entrada: 0,
+          salida: total,
+          observaciones: elegidas.map((r) => r.numero).join(', '),
+        }
+        const nuevasCats = await asegurarCategoriasRemesas(categorias)
+        return {
+          remesas: remesas.map((r) => (set.has(r.id) ? { ...r, liquidacion: movId } : r)),
+          movimientos: [mov, ...movimientos],
+          ...(nuevasCats ? { categorias: nuevasCats } : {}),
+        }
+      },
+    )
+    await registrarAuditoria([{ usuario: s.email, accion: 'crear', coleccion: 'remesas', detalle: `Liquidación a ${agente}: ${ids.length} remesas, ${total} USD desde ${cuenta}` }])
+    refrescar()
+    return { ok: true, mensaje: `Pago a ${agente} registrado: ${total.toFixed(2)} USD por ${ids.length} remesas.` }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+export async function guardarAjustesRemesas(pct: number, agentes: string[]): Promise<Resultado> {
+  try {
+    const s = await autorizar(['admin'])
+    if (!Number.isFinite(pct) || pct < 0 || pct > 50) throw new Error('Comisión inválida.')
+    const lista = [...new Set(agentes.map((a) => a.trim()).filter(Boolean))]
+    if (!lista.length) throw new Error('Indica al menos un agente.')
+    await mutar({ settings: DEFAULT_SETTINGS, remesas: [] as Remesa[] }, ({ settings, remesas }) => {
+      const enUso = [...new Set(remesas.map((r) => r.agente))].filter((a) => !lista.includes(a) && a !== 'Tropicargo (caja propia)')
+      if (enUso.length) throw new Error(`No se puede quitar ${enUso.join(', ')}: tiene remesas.`)
+      return { settings: { ...settings, comisionRemesasPct: pct, agentesRemesas: lista } }
+    })
+    await registrarAuditoria([{ usuario: s.email, accion: 'editar', coleccion: 'settings', detalle: `Remesas: comisión ${pct}%, agentes ${lista.join(', ')}` }])
+    refrescar()
+    return { ok: true, mensaje: 'Ajustes de remesas guardados.' }
   } catch (e) {
     return fallo(e)
   }

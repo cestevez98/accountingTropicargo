@@ -17,7 +17,7 @@ import type { Categoria, Dataset } from './types'
  *   <CuentaBalance>    resto del balance (cxc, cxp, capital, apertura…)
  */
 
-export type Fuente = 'mov' | 'fv' | 'fc' | 'cxm' | 'dev' | 'asi' | 'dep' | 'ape'
+export type Fuente = 'mov' | 'fv' | 'fc' | 'cxm' | 'dev' | 'asi' | 'dep' | 'ape' | 'rem'
 
 export const FUENTE_LABEL: Record<Fuente, string> = {
   mov: 'Movimiento',
@@ -28,7 +28,11 @@ export const FUENTE_LABEL: Record<Fuente, string> = {
   asi: 'Asiento manual',
   dep: 'Depreciación',
   ape: 'Apertura',
+  rem: 'Remesa',
 }
+
+/** Agente especial: la remesa la entrega Tropicargo desde su propia caja (la salida se registra como movimiento). */
+export const AGENTE_PROPIO = 'Tropicargo (caja propia)'
 
 export interface Linea {
   fecha: string
@@ -152,7 +156,16 @@ export function construirMayor(ds: Dataset): Mayor {
     push(a.fecha, a.cargo, a.abono, a.importe, 'asi', a.id, a.concepto, cat)
   }
 
-  // 8) Activos fijos: costo de apertura y depreciación mensual en línea recta.
+  // 8) Remesas: la comisión es ingreso al registrarla; al entregarla, lo que se debía al cliente pasa a deberse al agente.
+  for (const r of ds.remesas ?? []) {
+    if (r.estado === 'cancelada' || !r.fecha) continue
+    const concepto = `${r.numero} · ${r.remitente} → ${r.beneficiario}`
+    push(r.fecha, 'remesas', 'res:Comisiones de remesas', r.comision, 'rem', r.id, `${concepto} (comisión)`, 'Comisiones de remesas')
+    if (r.estado === 'entregada' && r.fechaEntrega && r.agente !== AGENTE_PROPIO)
+      push(r.fechaEntrega, 'remesas', 'agentes', r.monto, 'rem', r.id, `${concepto} (entregada por ${r.agente})`, 'Remesa')
+  }
+
+  // 9) Activos fijos: costo de apertura y depreciación mensual en línea recta.
   const mesInicio = ym(inicio)
   const ultimoMes = [ym(maxFecha), ym(hoy())].sort().at(-1)!
   for (const a of ds.activos) {

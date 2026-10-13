@@ -126,6 +126,7 @@ const FUENTE_PLURAL: Record<Fuente, string> = {
   asi: 'asientos manuales',
   dep: 'depreciación de activos',
   ape: 'apertura',
+  rem: 'remesas',
 }
 
 export interface ResultadoER extends Informe {

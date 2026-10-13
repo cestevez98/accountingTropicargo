@@ -29,6 +29,8 @@ export const CUENTAS_BALANCE = [
   'inventario',
   'devengos',
   'impuestos_por_pagar',
+  'remesas',
+  'agentes',
   'transito',
   'por_clasificar',
   'capital',
@@ -192,7 +194,7 @@ export interface Asiento {
   notas?: string
 }
 
-export type Rol = 'admin' | 'contador' | 'cajero' | 'lectura'
+export type Rol = 'admin' | 'contador' | 'cajero' | 'lectura' | 'agente'
 
 export interface Usuario {
   id: string
@@ -203,6 +205,47 @@ export interface Usuario {
   activo: boolean
   /** Solo para cajeros: cuentas en las que puede registrar. */
   cuentas?: string[]
+  /** Solo para agentes de remesas (p. ej. DVA): el agente al que pertenece. */
+  agente?: string
+}
+
+export type EstadoRemesa = 'pendiente' | 'asignada' | 'entregada' | 'cancelada'
+export type MonedaEntrega = 'USD' | 'CUP' | 'MLC' | 'EUR'
+
+/** Remesa: el cliente paga aquí y un agente (p. ej. DVA) la entrega en Cuba con su dinero; luego se le liquida. */
+export interface Remesa {
+  id: string
+  numero: string
+  fecha: string
+  remitente: string
+  remitenteTelefono?: string
+  beneficiario: string
+  beneficiarioTelefono?: string
+  beneficiarioCI?: string
+  direccion?: string
+  provincia?: string
+  /** USD que recibe el beneficiario (o su equivalente). Es lo que se le debe al agente al entregarla. */
+  monto: number
+  /** Comisión cobrada al cliente (por defecto el % configurado sobre el monto). */
+  comision: number
+  monedaEntrega: MonedaEntrega
+  /** Tasa usada si se entrega en CUP (CUP por USD). */
+  tasaEntrega?: number
+  /** Importe a entregar en la moneda de entrega. */
+  montoEntregar: number
+  /** Cuenta por la que pagó el cliente (Zelle → banco, PayPal, efectivo…). */
+  cuentaCobro?: string
+  agente: string
+  estado: EstadoRemesa
+  fechaEntrega?: string
+  /** Texto del comprobante (quién recibió, observaciones). */
+  comprobante?: string
+  /** Rutas de las fotos del comprobante en el almacenamiento privado. */
+  fotos?: string[]
+  /** Liquidación con la que se le pagó al agente. */
+  liquidacion?: string
+  notas?: string
+  creadoPor?: string
 }
 
 export interface Settings {
@@ -215,6 +258,10 @@ export interface Settings {
   mesesCerrados: string[]
   /** CUP que se suman a la tasa de elTOQUE para obtener la tasa de la empresa. */
   margenCupUsd: number
+  /** Comisión de las remesas, en % sobre el monto enviado. */
+  comisionRemesasPct: number
+  /** Agentes que entregan remesas en Cuba (p. ej. DVA). */
+  agentesRemesas: string[]
   /** USD que vale 1 EUR en las cajas (la oficina toma el euro 1×1). Al cambiarlo a mercado, la diferencia es ingreso financiero. */
   eurCajaUsd: number
   /** Última actualización automática de la tasa (ISO) y su resultado. */
@@ -257,6 +304,7 @@ export interface Dataset {
   devengos: Devengo[]
   asientos: Asiento[]
   reglas: ReglaCategoria[]
+  remesas: Remesa[]
 }
 
 export type DataCollection = Exclude<keyof Dataset, 'settings'>

@@ -14,6 +14,7 @@ type Def = [string, GrupoER, GrupoFlujo, Contrapartida, string?]
 const DEFS: Def[] = [
   [CAT_INGRESOS_FACTURADOS, 'INGRESOS', 'Explotación', 'resultado', 'Se calcula desde Facturación (Afecta ER = Sí)'],
   ['Otros ingresos', 'INGRESOS', 'Explotación', 'resultado', 'Pasajes, remesas, carros y otros ingresos no facturados'],
+  ['Comisiones de remesas', 'INGRESOS', 'Explotación', 'resultado', 'Se calcula desde el módulo de Remesas'],
   [CAT_VENTAS_FUERA, 'INGRESOS', 'Explotación', 'resultado', 'Contrapartida de las CxC fuera del sistema'],
 
   ['Proveedores Logisticos USA-Cuba', 'COSTO DE VENTAS', 'Explotación', 'resultado'],
@@ -47,7 +48,8 @@ const DEFS: Def[] = [
   ['Pago de CxP', 'NO AFECTA ER', 'Explotación', 'cxp', 'Pago de facturas de compra: baja la CxP'],
   ['PAGO PROVEEDOR NO AFECTA ER', 'NO AFECTA ER', 'Explotación', 'cxp'],
   ['Boleteria', 'NO AFECTA ER', 'Explotación', 'fondos_terceros'],
-  ['Remesa', 'NO AFECTA ER', 'Explotación', 'fondos_terceros'],
+  ['Remesa', 'NO AFECTA ER', 'Explotación', 'remesas', 'Cobro de una remesa al cliente (o entrega desde caja propia): mueve la cuenta de remesas por entregar'],
+  ['Pago a agentes de remesas', 'NO AFECTA ER', 'Explotación', 'agentes', 'Liquidación al agente (DVA) de las remesas que entregó'],
   ['Recarga de billetera', 'NO AFECTA ER', 'Explotación', 'fondos_terceros'],
 
   ['Compra de activo fijo', 'NO AFECTA ER', 'Inversión', 'activo_fijo'],
@@ -109,6 +111,8 @@ export const DEFAULT_SETTINGS: Settings = {
   cxcSistemaApertura: 0,
   mesesCerrados: [],
   margenCupUsd: 30,
+  comisionRemesasPct: 10,
+  agentesRemesas: ['DVA'],
   eurCajaUsd: 1,
 }
 
@@ -133,6 +137,8 @@ export const CUENTA_BALANCE_INFO: Record<CuentaBalance, { nombre: string; lado: 
   dep_acumulada: { nombre: 'Depreciación acumulada (−)', lado: 'activo_nc' },
   depositos: { nombre: 'Depósitos y garantías', lado: 'activo_nc' },
   cxp: { nombre: 'Pagos a proveedores sin factura registrada', lado: 'segun_signo', nombrePasivo: 'Cuentas por pagar — proveedores' },
+  remesas: { nombre: 'Remesas entregadas sin cobro registrado', lado: 'segun_signo', nombrePasivo: 'Remesas cobradas pendientes de entregar' },
+  agentes: { nombre: 'Anticipos a agentes de remesas', lado: 'segun_signo', nombrePasivo: 'Cuentas por pagar — agentes de remesas (DVA)' },
   fondos_terceros: { nombre: 'Fondos de clientes entregados de más (remesas, boletería)', lado: 'segun_signo', nombrePasivo: 'Fondos de clientes por entregar (remesas, boletería, billetera)' },
   impuestos_por_pagar: { nombre: 'Impuestos a favor', lado: 'segun_signo', nombrePasivo: 'Impuestos por pagar' },
   capital: { nombre: 'Capital y aportes', lado: 'patrimonio' },

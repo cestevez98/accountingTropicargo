@@ -11,7 +11,7 @@ import { opcionesFormulario } from '@/lib/opciones'
 import { param, type SP } from '@/lib/pagina'
 
 export default async function MovimientosPage({ searchParams }: { searchParams: SP }) {
-  const s = await requerirUsuario()
+  const s = await requerirUsuario(['admin', 'contador', 'cajero', 'lectura'])
   const sp = { ...(await searchParams) }
   const { ds, mayor } = await cargarContabilidad()
   const cfg = COLECCIONES.movimientos

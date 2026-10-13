@@ -12,6 +12,7 @@ import { redirect } from 'next/navigation'
 export default async function PanelPage({ searchParams }: { searchParams: SP }) {
   const s = await requerirUsuario()
   if (s.rol === 'cajero') redirect('/movimientos')
+  if (s.rol === 'agente') redirect('/remesas')
   const { ds, mayor, idx, anio, meses, sp } = await contextoInforme(searchParams)
   const er = estadoResultados(ds, idx, meses)
   const ultimoConDatos = ds.movimientos.reduce((a, m) => (m.fecha > a ? m.fecha : a), ds.settings.fechaInicio)

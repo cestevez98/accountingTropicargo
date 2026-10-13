@@ -24,6 +24,7 @@ function hojaInforme(inf: Informe) {
 export async function GET(req: Request) {
   const s = await sesionActual()
   if (!s) return new Response('No autorizado', { status: 401 })
+  if (s.rol === 'agente') return new Response('No autorizado', { status: 403 })
   const url = new URL(req.url)
   const sp = Object.fromEntries(url.searchParams)
   const { ds, mayor, idx } = await cargarContabilidad()

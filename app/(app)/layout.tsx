@@ -3,7 +3,8 @@ import { Nav, type ItemNav } from '@/components/Nav'
 import { ROL_LABEL, requerirUsuario } from '@/lib/auth'
 import type { Rol } from '@/lib/types'
 
-const TODOS: Rol[] = ['admin', 'contador', 'cajero', 'lectura']
+const TODOS: Rol[] = ['admin', 'contador', 'cajero', 'lectura', 'agente']
+const INTERNOS: Rol[] = ['admin', 'contador', 'cajero', 'lectura']
 const LECTORES: Rol[] = ['admin', 'contador', 'lectura']
 
 const SECCIONES: { titulo: string; items: (ItemNav & { roles: Rol[] })[] }[] = [
@@ -22,7 +23,8 @@ const SECCIONES: { titulo: string; items: (ItemNav & { roles: Rol[] })[] }[] = [
   {
     titulo: 'Registro',
     items: [
-      { href: '/movimientos', label: 'Movimientos', roles: TODOS },
+      { href: '/remesas', label: 'Remesas', roles: TODOS },
+      { href: '/movimientos', label: 'Movimientos', roles: INTERNOS },
       { href: '/extractos', label: 'Importar extracto bancario', roles: ['admin', 'contador'] },
       { href: '/facturacion', label: 'Facturación', roles: LECTORES },
       { href: '/registros/facturasCompra', label: 'Facturas de proveedores', roles: LECTORES },

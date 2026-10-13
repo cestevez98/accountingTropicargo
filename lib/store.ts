@@ -206,3 +206,33 @@ export async function mutar<T extends Record<string, unknown>>(defectos: T, fn: 
 }
 
 export const almacenamiento = process.env.BLOB_READ_WRITE_TOKEN ? 'Vercel Blob' : 'carpeta local .data'
+
+// ---------------------------------------------------------------- archivos (comprobantes)
+
+/** Guarda un archivo privado (p. ej. la foto de un comprobante). Devuelve la ruta. */
+export async function guardarArchivo(ruta: string, datos: Buffer, tipo: string): Promise<string> {
+  if (process.env.BLOB_READ_WRITE_TOKEN) {
+    const { put } = await import('@vercel/blob')
+    await put(ruta, datos, { access: 'private', contentType: tipo, addRandomSuffix: false, allowOverwrite: true })
+  } else {
+    const p = path.join(process.cwd(), '.data', ruta)
+    await fs.mkdir(path.dirname(p), { recursive: true })
+    await fs.writeFile(p, datos)
+  }
+  return ruta
+}
+
+export async function leerArchivoPrivado(ruta: string): Promise<{ datos: ReadableStream | Buffer; tipo: string } | null> {
+  if (process.env.BLOB_READ_WRITE_TOKEN) {
+    const { get } = await import('@vercel/blob')
+    const r = await get(ruta, { access: 'private' })
+    if (!r || !r.stream) return null
+    return { datos: r.stream, tipo: r.blob.contentType || 'application/octet-stream' }
+  }
+  try {
+    const datos = await fs.readFile(path.join(process.cwd(), '.data', ruta))
+    return { datos, tipo: ruta.endsWith('.png') ? 'image/png' : 'image/jpeg' }
+  } catch {
+    return null
+  }
+}

@@ -20,13 +20,14 @@ function secreto() {
   return new TextEncoder().encode(s)
 }
 
-export type Sesion = Pick<Usuario, 'id' | 'email' | 'nombre' | 'rol' | 'cuentas'>
+export type Sesion = Pick<Usuario, 'id' | 'email' | 'nombre' | 'rol' | 'cuentas' | 'agente'>
 
 export const ROL_LABEL: Record<Rol, string> = {
   admin: 'Administrador',
   contador: 'Contador',
   cajero: 'Cajero',
   lectura: 'Solo lectura',
+  agente: 'Agente de remesas',
 }
 
 // Freno simple contra fuerza bruta (por instancia).
@@ -84,7 +85,7 @@ export const sesionActual = cache(async (): Promise<Sesion | null> => {
     const { payload } = await jwtVerify(token, secreto())
     const u = (await leerUsuarios()).find((x) => x.id === payload.sub && x.activo)
     if (!u) return null
-    return { id: u.id, email: u.email, nombre: u.nombre, rol: u.rol, cuentas: u.cuentas }
+    return { id: u.id, email: u.email, nombre: u.nombre, rol: u.rol, cuentas: u.cuentas, agente: u.agente }
   } catch {
     return null
   }
@@ -94,7 +95,7 @@ export const sesionActual = cache(async (): Promise<Sesion | null> => {
 export async function requerirUsuario(roles?: Rol[]): Promise<Sesion> {
   const s = await sesionActual()
   if (!s) redirect('/login')
-  if (roles && !roles.includes(s.rol)) redirect('/?sinPermiso=1')
+  if (roles && !roles.includes(s.rol)) redirect(s.rol === 'agente' ? '/remesas' : '/?sinPermiso=1')
   return s
 }
 

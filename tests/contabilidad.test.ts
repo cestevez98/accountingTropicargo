@@ -34,6 +34,7 @@ function base(extra: Partial<Dataset> = {}): Dataset {
     devengos: [],
     asientos: [],
     reglas: [],
+    remesas: [],
     ...extra,
   }
 }
@@ -215,5 +216,45 @@ describe('euro en caja 1×1 y cambio de divisas', () => {
     const ds = base({ movimientos: [mov({ cuenta: 'Revolut', moneda: 'EUR', categoria: 'Cobro cliente', entrada: 100 })] })
     const { mayor } = informes(ds)
     expect(mayor.usd.get(ds.movimientos[0].id)).toBeCloseTo(110)
+  })
+})
+
+describe('remesas con agente', () => {
+  const remesa = (p: Partial<import('@/lib/types').Remesa> = {}): import('@/lib/types').Remesa => ({
+    id: 'r1',
+    numero: 'R-000001',
+    fecha: '2026-08-05',
+    remitente: 'Ana',
+    beneficiario: 'Luis',
+    monto: 100,
+    comision: 10,
+    monedaEntrega: 'USD',
+    montoEntregar: 100,
+    agente: 'DVA',
+    estado: 'pendiente',
+    ...p,
+  })
+  it('cobro + comisión + entrega por DVA + liquidación dejan todo a cero y 10 de ingreso', () => {
+    const cobro = mov({ cuenta: 'PayPal', categoria: 'Remesa', entrada: 110, fecha: '2026-08-05' })
+    const pago = mov({ cuenta: 'Truist', categoria: 'Pago a agentes de remesas', salida: 100, fecha: '2026-09-02' })
+    const ds = base({ movimientos: [cobro, pago], remesas: [remesa({ estado: 'entregada', fechaEntrega: '2026-08-07' })] })
+    const { er, es } = informes(ds)
+    expect(val(er, 'res:Comisiones de remesas', 0)).toBeCloseTo(10)
+    // Agosto: entregada y no pagada → se le debe a DVA.
+    expect(es.filas.find((f) => f.key === 'agentes-p')?.valores[0]).toBeCloseTo(100)
+    expect(es.filas.find((f) => f.key === 'remesas-p')).toBeUndefined()
+    // Septiembre: liquidada.
+    expect(es.filas.find((f) => f.key === 'agentes-p')?.valores[1] ?? 0).toBeCloseTo(0)
+    for (const v of es.cuadre) expect(Math.abs(v)).toBeLessThan(0.005)
+  })
+  it('una remesa cobrada y aún sin entregar queda como pasivo con el cliente', () => {
+    const ds = base({ movimientos: [mov({ cuenta: 'PayPal', categoria: 'Remesa', entrada: 110 })], remesas: [remesa()] })
+    const { es } = informes(ds)
+    expect(es.filas.find((f) => f.key === 'remesas-p')?.valores[0]).toBeCloseTo(100)
+  })
+  it('las canceladas no cuentan', () => {
+    const ds = base({ remesas: [remesa({ estado: 'cancelada' })] })
+    const { er } = informes(ds)
+    expect(val(er, 'res:Comisiones de remesas', 0)).toBeCloseTo(0)
   })
 })

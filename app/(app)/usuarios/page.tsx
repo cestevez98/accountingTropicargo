@@ -11,9 +11,9 @@ export default async function UsuariosPage() {
     <>
       <Encabezado
         titulo="Usuarios"
-        descripcion="Administrador: todo. Contador: registra y corrige todo menos usuarios e importación. Cajero: solo registra movimientos en las cajas que se le asignen. Solo lectura: ve informes y registros."
+        descripcion="Administrador: todo. Contador: registra y corrige todo menos usuarios e importación. Cajero: solo registra movimientos en las cajas que se le asignen. Solo lectura: ve informes y registros. Agente de remesas: solo ve y entrega las remesas de su agente."
       />
-      <GestionUsuarios usuarios={usuarios} cuentas={ds.cuentas.map((c) => c.nombre)} yo={s.id} />
+      <GestionUsuarios usuarios={usuarios} cuentas={ds.cuentas.map((c) => c.nombre)} agentes={ds.settings.agentesRemesas ?? ['DVA']} yo={s.id} />
     </>
   )
 }
