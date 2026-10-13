@@ -47,3 +47,33 @@ npm run paridad -- /ruta/Operaciones_KM-26.xlsx
 ## Despliegue (Vercel)
 
 Proyecto `kaluch-accounting` (Root Directory `kaluch`). Variables: `AUTH_SECRET`, `ADMIN_EMAIL`, `ADMIN_PASSWORD` (crean la primera cuenta de propietario), `BLOB_READ_WRITE_TOKEN` (Blob privado conectado al proyecto) y, para el TPV, `AXISPOS_PASSWORD`.
+
+## Sincronización con AxisPOS (modo ensayo)
+
+Cada dato tiene un dueño. Kaluch manda en el catálogo (precios por tienda y web, códigos de barras), la tasa y las compras del Almacén Central (área 1). AxisPOS manda en las ventas, las compras de los locales, los traslados del día y las cajas de los mercados.
+
+- **Solo lectura**: mientras `AXISPOS_ESCRITURA` no valga `1`, el cliente de la API rechaza toda escritura (`guardarMonedas`, `guardarUbicaciones`, `importarOperaciones`).
+- **Sincronización** (`/sincronizacion`): compara catálogo, tasa, compras al central y existencias con el TPV y enseña lo que se enviaría. No envía nada.
+- **Precios por tienda**: el `PriceGroup` de cada área decide la lista. 1 es el minorista (`Price`) y del 2 al 9 son `Price1`…`Price8`. Comprobado con ventas reales: KM 26 → Price1, KM 12 → Price2, San Lázaro → Price3.
+- **Cada noche** (Vercel Cron, 03:00 hora de Cuba) se llama a `/api/cron/sync` con `CRON_SECRET`. Trae las novedades del TPV y descarta lo que caiga en meses cerrados.
+
+## Tiendas
+
+- **Conteo a ciegas** (`/conteo`):
+  - El lector de códigos funciona como teclado y no se muestra la existencia del sistema.
+  - Al cerrar el conteo se compara con `ExportAvailable` del TPV, y solo administración ve el resultado.
+  - Los códigos que no están en el catálogo se buscan en MiBarcode y quedan pendientes de alta en Catálogos → Productos.
+- **Arqueo** (`/arqueo`):
+  - Se cuenta por billetes y se lee lo último del TPV de esa tienda.
+  - El esperado es el saldo de su caja en Kaluch.
+  - Genera un comprobante numerado en `/imprimir/arqueo`.
+- **Cuadre de cajas** (Caja y Banco → Cuadre de cajas):
+  - Muestra cobrado, gastos, entregado y saldo de cada mercado.
+  - Una entrega a la caja central genera dos movimientos de TRASPASO con el mismo comprobante, que se borran juntos.
+- **Rol dependiente**: solo conteo y arqueo de su tienda.
+
+## Catálogo para la web
+
+`GET /api/web/catalogo` con `Authorization: Bearer $WEB_CATALOGO_TOKEN` devuelve:
+- Por producto: código, nombre, grupo, códigos de barras, foto, descripción, precio web (costo del central + `margenWeb`) y precio de cada tienda.
+- Con `?existencias=1`: lo disponible para envío (Almacén Central) y para recogida en cada local, leído del TPV.
