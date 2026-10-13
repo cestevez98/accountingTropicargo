@@ -173,3 +173,55 @@ export async function facturasTP(desde: string, hasta: string): Promise<Facturas
     },
   }
 }
+
+// ---------------------------------------------------------------- pagos verificados
+
+export interface PagoTP {
+  id: number
+  numero: string
+  fecha: string
+  cliente: string
+  tipo: string
+  cuentaTP: string
+  monto: number
+  /** Facturas y multipagos que cita el pago (INV…, MUTIPAYMENT-…). */
+  refs: string[]
+}
+
+const sinHtml = (h: unknown) => String(h ?? '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+
+/** Referencias de cobro que aparecen en un texto: números de factura y de multipago. */
+export function refsCobro(t: string): string[] {
+  return [...new Set((t.toUpperCase().match(/\bINV\d+\b|\bMU?L?TIPAYMENT-\d+\b/g) ?? []).map((r) => r.replace(/^MU?L?TIPAYMENT/, 'MUTIPAYMENT')))]
+}
+
+export async function pagosTP(desde: string, hasta: string): Promise<PagoTP[]> {
+  const s = await entrar()
+  const cols = ['id', 'procesar', 'factura', 'qinvoice', 'cliente', 'items', 'fecha', 'removedate', 'tipo', 'monto', 'currency', 'taza', 'cuenta', 'agencia', 'type', 'fechaLast', 'agent', 'note', 'processedby', 'userverified', 'uservoid']
+  const out: PagoTP[] = []
+  for (let start = 0; start < 50000; start += 1000) {
+    const q = new URLSearchParams({ draw: '1' })
+    cols.forEach((c, i) => q.append(`columns[${i}][data]`, c))
+    const filtros = { 'order[0][column]': '5', 'order[0][dir]': 'desc', start: String(start), length: '1000', 'search[value]': '', 'search[regex]': 'false', agency: '0', fini: mdy(desde), fend: mdy(hasta), paidtype: '0', account: '0', verify: '', refund: '1', cancel: '1', remove: '', agent: '0' }
+    Object.entries(filtros).forEach(([k, v]) => q.append(k, v))
+    const r = await s.pedir(`/billpay/pagbillpay?${q}`, { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+    if (r.status !== 200) throw new Error(`Tracking Premium respondió ${r.status} al pedir los pagos.`)
+    const j = (await r.json()) as { data: Record<string, unknown>[] }
+    for (const x of j.data) {
+      const [m, d, y] = String(x.fecha).slice(0, 10).split('/')
+      const procesar = sinHtml(x.procesar)
+      out.push({
+        id: Number(x.id),
+        numero: procesar.split(' ')[0],
+        fecha: `${y}-${m}-${d}`,
+        cliente: sinHtml(x.cliente),
+        tipo: String(x.tipo ?? ''),
+        cuentaTP: sinHtml(x.cuenta).split(',')[0],
+        monto: Number(String(x.monto).replace(/,/g, '')),
+        refs: refsCobro(`${procesar} ${sinHtml(x.factura)}`),
+      })
+    }
+    if (j.data.length < 1000) break
+  }
+  return out
+}

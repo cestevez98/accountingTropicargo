@@ -55,9 +55,14 @@ export default async function FacturacionPage({ searchParams }: { searchParams: 
     <>
       <Encabezado titulo={cfg.titulo} descripcion={cfg.descripcion}>
         {s.rol !== 'lectura' && (
-          <Link href="/facturacion/tracking" className="btn btn-primario">
-            Traer de Tracking Premium
-          </Link>
+          <>
+            <Link href="/facturacion/cobros" className="btn">
+              Cobros de Tracking Premium
+            </Link>
+            <Link href="/facturacion/tracking" className="btn btn-primario">
+              Traer de Tracking Premium
+            </Link>
+          </>
         )}
       </Encabezado>
       <div className="mb-4 grid gap-3 sm:grid-cols-3">

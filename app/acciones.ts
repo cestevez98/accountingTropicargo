@@ -943,3 +943,91 @@ export async function confirmarSyncTP(nuevas: NuevaFacturaTP[], cambios: CambioF
     return fallo(e)
   }
 }
+
+// ---------------------------------------------------------------- cobros de Tracking Premium
+
+export interface ConciliacionCobrosTP {
+  caja: string
+  grupos: import('@/lib/conciliar-cobros').GrupoCobro[]
+  /** Pagos del período que no entran en una caja física (Square, PayPal, wallet, banco…), por tipo y cuenta. */
+  otros: { tipo: string; cuentaTP: string; n: number; monto: number }[]
+}
+
+const sumarDias = (f: string, d: number) => new Date(Date.parse(`${f}T00:00:00Z`) + d * 86400000).toISOString().slice(0, 10)
+
+/** Compara los pagos verificados de Tracking Premium con los cobros registrados en una caja. No guarda nada. */
+export async function prepararCobrosTP(caja: string, desde: string, hasta: string): Promise<{ ok: true; datos: ConciliacionCobrosTP } | { ok: false; error: string }> {
+  try {
+    await autorizar(['admin', 'contador'])
+    if (!esFecha(desde) || !esFecha(hasta) || desde > hasta) throw new Error('Rango de fechas inválido.')
+    if ((Date.parse(hasta) - Date.parse(desde)) / 86400000 > 120) throw new Error('Como máximo 120 días por consulta.')
+    const { pagosTP, refsCobro } = await import('@/lib/trackingpremium')
+    const { CAJA_DE_CUENTA_TP, conciliarCobros } = await import('@/lib/conciliar-cobros')
+    const { cargarContabilidad } = await import('@/lib/data')
+    // Se piden unos días de margen a cada lado: un cobro puede registrarse en la caja un día antes o después.
+    const [todos, { ds, mayor }] = await Promise.all([pagosTP(sumarDias(desde, -5), sumarDias(hasta, 5)), cargarContabilidad()])
+    // Pagar con wallet no mete efectivo en la caja: el dinero entró antes, con la recarga de billetera.
+    const enCaja = (p: { tipo: string; cuentaTP: string }) => Boolean(CAJA_DE_CUENTA_TP[p.cuentaTP]) && p.tipo !== 'Wallet'
+    const pagos = todos.filter((p) => enCaja(p) && CAJA_DE_CUENTA_TP[p.cuentaTP] === caja)
+    const cobros = ds.movimientos
+      .filter((m) => m.cuenta === caja && m.categoria === 'Cobro cliente' && m.fecha >= sumarDias(desde, -5) && m.fecha <= sumarDias(hasta, 5) && !/recarga\s+(de\s+)?billetera/i.test(m.concepto))
+      .map((m) => ({ id: m.id, fecha: m.fecha, concepto: m.concepto, usd: mayor.usd.get(m.id) ?? 0, refs: refsCobro(`${m.concepto} ${m.referencia ?? ''}`) }))
+    const grupos = conciliarCobros(pagos, cobros).filter((g) => g.fecha >= desde && g.fecha <= hasta)
+    const otros = new Map<string, { tipo: string; cuentaTP: string; n: number; monto: number }>()
+    for (const p of todos) {
+      if (enCaja(p) || p.fecha < desde || p.fecha > hasta) continue
+      const k = `${p.tipo}|${p.cuentaTP}`
+      const o = otros.get(k) ?? { tipo: p.tipo, cuentaTP: p.cuentaTP || 'N/A', n: 0, monto: 0 }
+      o.n++
+      o.monto += p.monto
+      otros.set(k, o)
+    }
+    return { ok: true, datos: { caja, grupos, otros: [...otros.values()].sort((a, b) => b.monto - a.monto) } }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/** Registra en la caja, como «Cobro cliente», los pagos de Tracking Premium elegidos. */
+export async function importarCobrosTP(caja: string, pagos: import('@/lib/trackingpremium').PagoTP[]): Promise<Resultado> {
+  try {
+    const s = await autorizar(['admin', 'contador'])
+    const { CAJA_DE_CUENTA_TP } = await import('@/lib/conciliar-cobros')
+    let creados = 0
+    let omitidos = 0
+    await mutar({ movimientos: [] as import('@/lib/types').Movimiento[], settings: DEFAULT_SETTINGS }, ({ movimientos, settings }) => {
+      const refs = new Set(movimientos.map((m) => m.referencia).filter(Boolean))
+      const nuevos: import('@/lib/types').Movimiento[] = []
+      for (const p of pagos) {
+        if (CAJA_DE_CUENTA_TP[p.cuentaTP] !== caja || p.tipo === 'Wallet') throw new Error(`El pago ${p.numero} no es un cobro en efectivo de ${caja}.`)
+        if (!esFecha(p.fecha) || !Number.isFinite(p.monto) || p.monto <= 0) throw new Error(`Pago inválido: ${p.numero}`)
+        if (s.rol !== 'admin' && settings.mesesCerrados.includes(p.fecha.slice(0, 7))) throw new Error(`El mes de ${p.fecha} está cerrado.`)
+        const referencia = `TP-PAGO-${p.id}`
+        if (refs.has(referencia)) {
+          omitidos++
+          continue
+        }
+        refs.add(referencia)
+        nuevos.push({
+          id: crypto.randomUUID(),
+          fecha: p.fecha,
+          cuenta: caja,
+          categoria: 'Cobro cliente',
+          concepto: `${p.refs.join(', ') || p.numero} ${p.cliente}`.slice(0, 300),
+          referencia,
+          moneda: 'USD',
+          entrada: p.monto,
+          salida: 0,
+          observaciones: `Importado de Tracking Premium (${p.numero}, ${p.tipo}, ${p.cuentaTP})`,
+        })
+        creados++
+      }
+      return { movimientos: [...movimientos, ...nuevos] }
+    })
+    await registrarAuditoria([{ usuario: s.email, accion: 'importar', coleccion: 'movimientos', detalle: `Cobros de Tracking Premium en ${caja}: ${creados} registrados` }])
+    refrescar()
+    return { ok: true, mensaje: `${creados} cobros registrados en ${caja}${omitidos ? ` (${omitidos} ya estaban)` : ''}.` }
+  } catch (e) {
+    return fallo(e)
+  }
+}
