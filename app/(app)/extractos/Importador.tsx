@@ -26,7 +26,7 @@ import {
 const nf = new Intl.NumberFormat('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 const fmt = (n: number | undefined) => (n == null || !Number.isFinite(n) ? '—' : nf.format(n))
 
-type Vista = 'nuevas' | 'distintas' | 'registradas' | 'errores'
+type Vista = 'nuevas' | 'distintas' | 'registradas' | 'sistema' | 'errores'
 
 export function ImportadorExtractos({ cuentas, categorias }: { cuentas: string[]; categorias: { grupo: string; nombres: string[] }[] }) {
   const router = useRouter()
@@ -41,6 +41,7 @@ export function ImportadorExtractos({ cuentas, categorias }: { cuentas: string[]
   const [recordar, setRecordar] = useState<Record<number, boolean>>({})
   const [excluir, setExcluir] = useState<Record<number, boolean>>({})
   const [corregir, setCorregir] = useState<Record<number, boolean>>({})
+  const [borrar, setBorrar] = useState<Record<string, boolean>>({})
   const [vista, setVista] = useState<Vista>('nuevas')
   const [saldoBanco, setSaldoBanco] = useState('')
   const [fechaSaldo, setFechaSaldo] = useState('')
@@ -66,6 +67,7 @@ export function ImportadorExtractos({ cuentas, categorias }: { cuentas: string[]
       setRecordar({})
       setExcluir({})
       setCorregir({})
+      setBorrar({})
       if (tabla.saldoFinal) {
         setSaldoBanco(String(tabla.saldoFinal.importe))
         setFechaSaldo(tabla.saldoFinal.fecha)
@@ -95,7 +97,11 @@ export function ImportadorExtractos({ cuentas, categorias }: { cuentas: string[]
     const sugerencias = new Map<number, { categoria: string; motivo: string } | null>()
     for (const l of lineas) sugerencias.set(l.n, sugerirCategoria(l, cuenta, datos.reglas, datos.aprendidas))
     const fechas = lineas.filter((l) => l.fecha).map((l) => l.fecha).sort()
-    return { lineas, dup, dif, sugerencias, desde: fechas[0], hasta: fechas.at(-1) }
+    const desde = fechas[0]
+    const hasta = fechas.at(-1)
+    // Lo que el sistema tiene dentro del período del extracto y el banco no trae.
+    const soloSistema = desde ? datos.existentes.filter((e) => !usados.has(e.id) && e.fecha >= desde && e.fecha <= hasta!).sort((a, b) => a.fecha.localeCompare(b.fecha)) : []
+    return { lineas, dup, dif, sugerencias, desde, hasta, soloSistema }
   }, [archivo, datos, mapeo, fechaFmt, invertir, formato, cuenta])
 
   const grupos = useMemo(() => {
@@ -122,11 +128,11 @@ export function ImportadorExtractos({ cuentas, categorias }: { cuentas: string[]
     let sistema = 0
     const corr = new Map<string, number>()
     for (const l of grupos.distintas) if (seCorrige(l)) corr.set(analisis.dif.get(l.n)!.id, l.importe)
-    for (const e of datos.existentes) if (e.fecha <= fechaSaldo) sistema += corr.get(e.id) ?? e.importe
+    for (const e of datos.existentes) if (e.fecha <= fechaSaldo && !borrar[e.id]) sistema += corr.get(e.id) ?? e.importe
     for (const l of grupos.nuevas) if (seImporta(l) && l.fecha <= fechaSaldo) sistema += l.importe
     return { banco, sistema, diferencia: banco - sistema }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [analisis, grupos, datos, fechaSaldo, saldoBanco, excluir, corregir])
+  }, [analisis, grupos, datos, fechaSaldo, saldoBanco, excluir, corregir, borrar])
 
   function importar() {
     if (!analisis || !grupos || !archivo) return
@@ -143,12 +149,14 @@ export function ImportadorExtractos({ cuentas, categorias }: { cuentas: string[]
     const reglas = grupos.nuevas
       .filter((l) => recordar[l.n] && claveConcepto(l.concepto))
       .map((l) => ({ contiene: claveConcepto(l.concepto), categoria: categoriaDe(l), sentido: (l.importe >= 0 ? 'entrada' : 'salida') as 'entrada' | 'salida' }))
-    if (!nuevos.length && !correcciones.length) return setMsg({ ok: false, t: 'No hay nada que importar ni corregir.' })
-    if (!confirm(`Se importarán ${nuevos.length} movimientos y se corregirán ${correcciones.length} importes en «${cuenta}». ¿Continuar?`)) return
+    const ids = analisis.soloSistema.filter((e) => borrar[e.id]).map((e) => e.id)
+    if (!nuevos.length && !correcciones.length && !ids.length) return setMsg({ ok: false, t: 'No hay nada que importar, corregir ni borrar.' })
+    if (!confirm(`En «${cuenta}» se importarán ${nuevos.length} movimientos, se corregirán ${correcciones.length} importes y se borrarán ${ids.length}. ¿Continuar?`)) return
     start(async () => {
-      const r = await confirmarExtracto(cuenta, archivo.nombre, nuevos, correcciones, reglas)
+      const r = await confirmarExtracto(cuenta, archivo.nombre, nuevos, correcciones, reglas, ids)
       setMsg({ ok: r.ok, t: r.ok ? (r.mensaje ?? 'Hecho.') : r.error })
       if (r.ok) {
+        setBorrar({})
         await cargarDatos(cuenta)
         router.refresh()
       }
@@ -157,6 +165,7 @@ export function ImportadorExtractos({ cuentas, categorias }: { cuentas: string[]
 
   const n = grupos ? { nuevas: grupos.nuevas.length, distintas: grupos.distintas.length, registradas: grupos.registradas.length, errores: grupos.errores.length } : null
   const aImportar = grupos ? grupos.nuevas.filter(seImporta) : []
+  const aBorrar = analisis ? analisis.soloSistema.filter((e) => borrar[e.id]) : []
 
   return (
     <div className="space-y-4">
@@ -261,11 +270,17 @@ export function ImportadorExtractos({ cuentas, categorias }: { cuentas: string[]
 
       {analisis && grupos && n && (
         <>
-          <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+          <section className="grid gap-3 sm:grid-cols-3 xl:grid-cols-6">
             <Resumen titulo="Período del extracto" valor={analisis.desde ? `${analisis.desde} → ${analisis.hasta}` : '—'} />
             <Resumen titulo="Nuevos" valor={String(n.nuevas)} sub={`${fmt(grupos.nuevas.reduce((a, l) => a + l.importe, 0))} USD`} tono={n.nuevas ? 'info' : undefined} />
             <Resumen titulo="Importe distinto en el sistema" valor={String(n.distintas)} tono={n.distintas ? 'aviso' : undefined} sub="Posibles errores de tecleo" />
             <Resumen titulo="Ya registrados" valor={String(n.registradas)} sub="Se ignoran" />
+            <Resumen
+              titulo="Solo en el sistema"
+              valor={String(analisis.soloSistema.length)}
+              sub={`${fmt(analisis.soloSistema.reduce((a, e) => a + e.importe, 0))} USD · el banco no los trae`}
+              tono={analisis.soloSistema.length ? 'aviso' : undefined}
+            />
             <Resumen titulo="Filas con error" valor={String(n.errores)} tono={n.errores ? 'error' : undefined} />
           </section>
 
@@ -302,6 +317,7 @@ export function ImportadorExtractos({ cuentas, categorias }: { cuentas: string[]
                 ['nuevas', `Nuevos (${n.nuevas})`],
                 ['distintas', `Importe distinto (${n.distintas})`],
                 ['registradas', `Ya registrados (${n.registradas})`],
+                ['sistema', `Solo en el sistema (${analisis.soloSistema.length})`],
                 ['errores', `Con error (${n.errores})`],
               ] as [Vista, string][]
             ).map(([v, t]) => (
@@ -311,6 +327,45 @@ export function ImportadorExtractos({ cuentas, categorias }: { cuentas: string[]
             ))}
           </div>
 
+          {vista === 'sistema' ? (
+            <div className="tarjeta overflow-x-auto">
+              <p className="border-b border-slate-100 px-3 py-2 text-xs text-slate-500">
+                Movimientos que el sistema tiene entre {analisis.desde} y {analisis.hasta} y que no aparecen en el extracto. Suelen ser cargos pendientes que el banco
+                después asentó con otro importe o fecha (típico de Amazon), o líneas duplicadas. Marca los que quieras borrar; los demás se quedan como están.
+              </p>
+              <table className="tabla">
+                <thead>
+                  <tr>
+                    <th className="w-8">Borrar</th>
+                    <th>Fecha</th>
+                    <th>Concepto</th>
+                    <th className="num">Importe</th>
+                    <th>Referencia</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {analisis.soloSistema.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="py-6 text-center text-slate-500">
+                        Todo lo del sistema en este período está en el extracto.
+                      </td>
+                    </tr>
+                  )}
+                  {analisis.soloSistema.map((e) => (
+                    <tr key={e.id} className={borrar[e.id] ? 'bg-red-50 line-through' : ''}>
+                      <td>
+                        <input type="checkbox" checked={Boolean(borrar[e.id])} onChange={(ev) => setBorrar({ ...borrar, [e.id]: ev.target.checked })} />
+                      </td>
+                      <td className="whitespace-nowrap">{e.fecha}</td>
+                      <td className="max-w-md">{e.concepto}</td>
+                      <td className="num">{fmt(e.importe)}</td>
+                      <td className="text-xs text-slate-500">{e.referencia}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
           <div className="tarjeta overflow-x-auto">
             <table className="tabla">
               <thead>
@@ -328,14 +383,14 @@ export function ImportadorExtractos({ cuentas, categorias }: { cuentas: string[]
                 </tr>
               </thead>
               <tbody>
-                {grupos[vista].length === 0 && (
+                {grupos[vista as Exclude<Vista, 'sistema'>].length === 0 && (
                   <tr>
                     <td colSpan={8} className="py-6 text-center text-slate-500">
                       Nada en esta lista.
                     </td>
                   </tr>
                 )}
-                {grupos[vista].map((l) => {
+                {grupos[vista as Exclude<Vista, 'sistema'>].map((l) => {
                   const sug = analisis.sugerencias.get(l.n)
                   const ex = analisis.dif.get(l.n)
                   return (
@@ -397,10 +452,13 @@ export function ImportadorExtractos({ cuentas, categorias }: { cuentas: string[]
               </tbody>
             </table>
           </div>
+          )}
 
           <div className="flex flex-wrap items-center gap-3">
-            <button className="btn btn-primario" disabled={pendiente || (!aImportar.length && !grupos.distintas.some(seCorrige))} onClick={importar}>
-              {pendiente ? 'Guardando…' : `Importar ${aImportar.length} nuevos y corregir ${grupos.distintas.filter(seCorrige).length} importes`}
+            <button className="btn btn-primario" disabled={pendiente || (!aImportar.length && !grupos.distintas.some(seCorrige) && !aBorrar.length)} onClick={importar}>
+              {pendiente
+                ? 'Guardando…'
+                : `Importar ${aImportar.length} nuevos y corregir ${grupos.distintas.filter(seCorrige).length} importes${aBorrar.length ? ` · borrar ${aBorrar.length}` : ''}`}
             </button>
             <span className="text-xs text-slate-500">Los movimientos sin categoría entran como «Por clasificar» y se pueden clasificar después en Movimientos.</span>
           </div>

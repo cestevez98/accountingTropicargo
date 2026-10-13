@@ -102,7 +102,16 @@ export async function guardarRegistro(coleccion: string, id: string | null, valo
     const s = await autorizar(cfg.rolesEditar)
     let etiqueta = ''
     await mutar(
-      { [coleccion]: [] as Fila[], categorias: DEFECTOS.categorias, cuentas: DEFECTOS.cuentas, settings: DEFAULT_SETTINGS, movimientos: [] as Fila[] } as Record<string, unknown>,
+      {
+        [coleccion]: [] as Fila[],
+        categorias: DEFECTOS.categorias,
+        cuentas: DEFECTOS.cuentas,
+        settings: DEFAULT_SETTINGS,
+        movimientos: [] as Fila[],
+        ...(coleccion === 'categorias' || coleccion === 'cuentas'
+          ? { facturasCompra: [] as Fila[], devengos: [] as Fila[], reglas: [] as Fila[], asientos: [] as Fila[], pagosProveedor: [] as Fila[], usuarios: [] as Fila[] }
+          : {}),
+      } as Record<string, unknown>,
       (actual) => {
         const ds = actual as unknown as Dataset
         const filas = actual[coleccion] as Fila[]
@@ -128,7 +137,25 @@ export async function guardarRegistro(coleccion: string, id: string | null, valo
           const dup = filas.some((f) => f.id !== nuevo.id && f.nombre === nuevo.nombre)
           if (dup) throw new Error(`Ya existe «${nuevo.nombre}».`)
           const campoRef = coleccion === 'categorias' ? 'categoria' : 'cuenta'
-          out.movimientos = (actual.movimientos as Fila[]).map((m) => (m[campoRef] === previo.nombre ? { ...m, [campoRef]: nuevo.nombre } : m))
+          const antes = String(previo.nombre)
+          const despues = String(nuevo.nombre)
+          const cambia = (f: Fila, k: string) => (f[k] === antes ? { ...f, [k]: despues } : f)
+          out.movimientos = (actual.movimientos as Fila[]).map((m) => cambia(m, campoRef))
+          // El nombre también aparece en otras tablas: se actualiza en todas.
+          if (coleccion === 'categorias') {
+            out.facturasCompra = (actual.facturasCompra as Fila[]).map((f) => cambia(f, 'categoria'))
+            out.devengos = (actual.devengos as Fila[]).map((f) => cambia(f, 'categoria'))
+            out.reglas = (actual.reglas as Fila[]).map((f) => cambia(f, 'categoria'))
+            const clave = (k: unknown) => (k === `res:${antes}` ? `res:${despues}` : k)
+            out.asientos = (actual.asientos as Fila[]).map((a) => ({ ...a, cargo: clave(a.cargo), abono: clave(a.abono) }))
+          } else {
+            out.pagosProveedor = (actual.pagosProveedor as Fila[]).map((f) => cambia(f, 'cuenta'))
+            out.devengos = (actual.devengos as Fila[]).map((f) => cambia(f, 'origen'))
+            out.reglas = (actual.reglas as Fila[]).map((f) => cambia(f, 'cuenta'))
+            const clave = (k: unknown) => (k === `tes:${antes}` ? `tes:${despues}` : k)
+            out.asientos = (actual.asientos as Fila[]).map((a) => ({ ...a, cargo: clave(a.cargo), abono: clave(a.abono) }))
+            out.usuarios = (actual.usuarios as (Fila & { cuentas?: string[] })[]).map((u) => (u.cuentas?.includes(antes) ? { ...u, cuentas: u.cuentas.map((c) => (c === antes ? despues : c)) } : u))
+          }
         }
         if (!previo && (coleccion === 'categorias' || coleccion === 'cuentas') && filas.some((f) => f.nombre === nuevo.nombre))
           throw new Error(`Ya existe «${nuevo.nombre}».`)
@@ -480,12 +507,14 @@ export async function confirmarExtracto(
   nuevos: NuevoDesdeExtracto[],
   correcciones: { id: string; importe: number }[],
   reglasNuevas: { contiene: string; categoria: string; sentido: 'entrada' | 'salida' }[],
+  borrar: string[] = [],
 ): Promise<Resultado> {
   try {
     const s = await autorizar(['admin', 'contador'])
     let creados = 0
     let corregidos = 0
     let omitidos = 0
+    let borrados = 0
     await mutar(
       {
         movimientos: [] as import('@/lib/types').Movimiento[],
@@ -495,7 +524,7 @@ export async function confirmarExtracto(
         reglas: [] as import('@/lib/types').ReglaCategoria[],
       },
       ({ movimientos, categorias, cuentas, settings, reglas }) => {
-        creados = corregidos = omitidos = 0
+        creados = corregidos = omitidos = borrados = 0
         if (!cuentas.some((c) => c.nombre === cuenta)) throw new Error('Cuenta desconocida.')
         const cats = new Set(categorias.map((c) => c.nombre))
         const refs = new Set(movimientos.filter((m) => m.cuenta === cuenta && m.referencia).map((m) => m.referencia))
@@ -526,7 +555,13 @@ export async function confirmarExtracto(
           creados++
         }
         const mapa = new Map(correcciones.map((c) => [c.id, c.importe]))
-        const actualizados = movimientos.map((m) => {
+        const aBorrar = new Set(borrar)
+        const actualizados = movimientos.filter((m) => {
+          if (!aBorrar.has(m.id) || m.cuenta !== cuenta) return true
+          if (cerrado(m.fecha)) throw new Error(`El mes de ${m.fecha} está cerrado.`)
+          borrados++
+          return false
+        }).map((m) => {
           const imp = mapa.get(m.id)
           if (imp == null || m.cuenta !== cuenta) return m
           if (cerrado(m.fecha)) throw new Error(`El mes de ${m.fecha} está cerrado.`)
@@ -542,10 +577,18 @@ export async function confirmarExtracto(
       },
     )
     await registrarAuditoria([
-      { usuario: s.email, accion: 'importar', coleccion: 'movimientos', detalle: `Extracto ${archivo} (${cuenta}): ${creados} nuevos, ${corregidos} importes corregidos, ${omitidos} omitidos por referencia repetida` },
+      {
+        usuario: s.email,
+        accion: 'importar',
+        coleccion: 'movimientos',
+        detalle: `Extracto ${archivo} (${cuenta}): ${creados} nuevos, ${corregidos} importes corregidos, ${borrados} borrados por no estar en el banco, ${omitidos} omitidos por referencia repetida`,
+      },
     ])
     refrescar()
-    return { ok: true, mensaje: `${creados} movimientos importados y ${corregidos} importes corregidos${omitidos ? ` (${omitidos} ya estaban por referencia)` : ''}.` }
+    return {
+      ok: true,
+      mensaje: `${creados} movimientos importados, ${corregidos} importes corregidos${borrados ? ` y ${borrados} borrados` : ''}${omitidos ? ` (${omitidos} ya estaban por referencia)` : ''}.`,
+    }
   } catch (e) {
     return fallo(e)
   }
