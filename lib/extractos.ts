@@ -73,8 +73,8 @@ export const FORMATOS: Formato[] = [
     descartarEstados: ['reverted', 'declined', 'failed', 'revertido', 'rechazado', 'fallido'],
   },
   {
-    id: 'amex-corporativa',
-    nombre: 'American Express — corporativa',
+    id: 'tarjeta-corporativa',
+    nombre: 'Tarjeta corporativa BofA (Posting Date, Reference ID, MCC)',
     firma: ['posting date', 'reference id', 'amount'],
     columnas: {
       fecha: ['posting date'],

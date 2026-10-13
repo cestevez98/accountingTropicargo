@@ -100,7 +100,7 @@ describe('categoría sugerida', () => {
   })
 })
 
-describe('extracto AMEX corporativo', () => {
+describe('extracto tarjeta corporativa BofA (Kiara ·6512)', () => {
   const CSV = `Description,,,,Summary Amt.
 Total credits,,,,"-44.31"
 Total debits,,,,"6312.96"
@@ -112,7 +112,7 @@ KIARA I SOLINO,6512,10/07/2026,10/06/2026,Ref: 55432866279209905617350,"AMAZON M
     const t = leerArchivo('amex.csv', buf(CSV))
     const f = detectarFormato(t)
     const ls = convertir(t, mapear(t, f), { fecha: f!.fecha, invertir: f!.invertir })
-    expect(f?.id).toBe('amex-corporativa')
+    expect(f?.id).toBe('tarjeta-corporativa')
     expect(ls.map((l) => [l.fecha, l.importe, l.referencia])).toEqual([
       ['2026-10-12', -3.99, '82711096283000538673645'],
       ['2026-10-07', 44.31, '55432866279209905617350'],
