@@ -1,7 +1,10 @@
 import { notFound } from 'next/navigation'
 import { Filtros, Paginacion } from '@/components/Filtros'
 import { TablaRegistros } from '@/components/TablaRegistros'
+import { PanelTasas } from '@/components/PanelTasas'
 import { Encabezado } from '@/components/ui'
+import { hoyCuba, tokenConfigurado } from '@/lib/eltoque'
+import { prepararTasas, tasaVigente } from '@/lib/fx'
 import { requerirUsuario } from '@/lib/auth'
 import { nombreCuentaMayor } from '@/lib/catalog'
 import { COLECCIONES } from '@/lib/colecciones'
@@ -10,6 +13,8 @@ import { listar } from '@/lib/listado'
 import { opcionesFormulario } from '@/lib/opciones'
 import type { SP } from '@/lib/pagina'
 import type { Dataset } from '@/lib/types'
+
+export const maxDuration = 120
 
 const DEDICADAS: Record<string, string> = { movimientos: '/movimientos', facturas: '/facturacion' }
 
@@ -57,6 +62,18 @@ export default async function RegistrosPage({ params, searchParams }: { params: 
   return (
     <>
       <Encabezado titulo={cfg.titulo} descripcion={cfg.descripcion} />
+      {col === 'tasas' && (
+        <PanelTasas
+          token={tokenConfigurado()}
+          margen={ds.settings.margenCupUsd}
+          ultima={ds.settings.ultimaTasaAuto}
+          hoy={hoyCuba()}
+          vigente={tasaVigente(prepararTasas(ds.tasas), hoyCuba())}
+          fechaInicio={ds.settings.fechaInicio}
+          esAdmin={s.rol === 'admin'}
+          puedeActualizar={s.rol === 'admin' || s.rol === 'contador'}
+        />
+      )}
       <Filtros cfg={cfg} listado={listado} base={base} />
       <TablaRegistros
         coleccion={col}

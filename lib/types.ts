@@ -67,6 +67,12 @@ export interface Tasa {
   cupPorUsd: number
   usdPorEur: number
   confirmada: boolean
+  /** 'eltoque' si la trajo la actualización automática; vacío si se cargó a mano. */
+  fuente?: string
+  /** Tasa del mercado informal publicada por elTOQUE (CUP por USD), antes del margen. */
+  mercadoUsd?: number
+  /** Tasa de elTOQUE para el EUR (CUP por EUR). */
+  mercadoEur?: number
 }
 
 export interface Movimiento {
@@ -207,6 +213,10 @@ export interface Settings {
   /** Saldo de CxC de clientes del sistema de facturación al cierre anterior a fechaInicio. */
   cxcSistemaApertura: number
   mesesCerrados: string[]
+  /** CUP que se suman a la tasa de elTOQUE para obtener la tasa de la empresa. */
+  margenCupUsd: number
+  /** Última actualización automática de la tasa (ISO) y su resultado. */
+  ultimaTasaAuto?: { ts: string; ok: boolean; detalle: string }
 }
 
 export interface AuditEntry {

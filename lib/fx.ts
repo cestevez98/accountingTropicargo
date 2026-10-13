@@ -6,7 +6,8 @@ export interface TablaTasas {
 }
 
 export function prepararTasas(tasas: Tasa[]): TablaTasas {
-  const ordenadas = [...tasas].filter((t) => t.fecha).sort((a, b) => a.fecha.localeCompare(b.fecha))
+  // Una tasa en 0 o vacía (p. ej. días futuros sin rellenar en el Excel) no cuenta: se usa la anterior válida.
+  const ordenadas = [...tasas].filter((t) => t.fecha && t.cupPorUsd > 0).sort((a, b) => a.fecha.localeCompare(b.fecha))
   return { fechas: ordenadas.map((t) => t.fecha), tasas: ordenadas }
 }
 
@@ -42,3 +43,29 @@ export function movUSD(m: Pick<Movimiento, 'moneda' | 'entrada' | 'salida' | 'fe
   }
   return NaN
 }
+
+// ---------------------------------------------------------------- elTOQUE
+
+export interface TasaMercado {
+  usd: number
+  eur?: number
+}
+
+/** Extrae USD y EUR de la respuesta (elTOQUE llama «ECU» al euro). */
+export function leerRespuesta(json: unknown): TasaMercado {
+  const raiz = (json && typeof json === 'object' ? json : {}) as Record<string, unknown>
+  const tasas = (raiz.tasas && typeof raiz.tasas === 'object' ? raiz.tasas : raiz) as Record<string, unknown>
+  const num = (v: unknown) => (typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN)
+  const usd = num(tasas.USD ?? tasas.usd)
+  const eur = num(tasas.ECU ?? tasas.EUR ?? tasas.eur)
+  if (!Number.isFinite(usd) || usd <= 0) throw new Error(`elTOQUE no devolvió la tasa del USD (respuesta: ${JSON.stringify(json).slice(0, 200)}).`)
+  return { usd, eur: Number.isFinite(eur) && eur > 0 ? eur : undefined }
+}
+
+export function tasaEmpresa(m: TasaMercado, margen: number) {
+  const cupPorUsd = Math.round((m.usd + margen) * 100) / 100
+  // El EUR se convierte a USD con la relación del mercado (CUP por EUR ÷ CUP por USD).
+  const usdPorEur = m.eur ? Math.round((m.eur / m.usd) * 10000) / 10000 : undefined
+  return { cupPorUsd, usdPorEur }
+}
+

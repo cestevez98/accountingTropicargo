@@ -363,3 +363,58 @@ export async function cambiarMiPassword(_prev: Resultado | null, form: FormData)
     return fallo(e)
   }
 }
+
+// ---------------------------------------------------------------- tasas de elTOQUE
+
+export async function actualizarTasaHoy(): Promise<Resultado> {
+  try {
+    const s = await autorizar(['admin', 'contador'])
+    const { actualizarTasas, hoyCuba } = await import('@/lib/eltoque')
+    const r = await actualizarTasas([hoyCuba()])
+    await registrarAuditoria([{ usuario: s.email, accion: 'editar', coleccion: 'tasas', detalle: `Actualización manual elTOQUE: ${r.detalle}` }])
+    refrescar()
+    return r.guardadas.length ? { ok: true, mensaje: r.detalle } : { ok: false, error: r.detalle }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+/** Trae de elTOQUE la tasa de cada día desde `desde` hasta hoy. Reemplaza las importadas del Excel, no las manuales. */
+export async function rellenarTasas(desde: string): Promise<Resultado> {
+  try {
+    const s = await autorizar(['admin'])
+    if (!esFecha(desde)) throw new Error('Fecha inválida.')
+    const { actualizarTasas, diasHastaHoy } = await import('@/lib/eltoque')
+    const dias = diasHastaHoy(desde)
+    if (dias.length > 400) throw new Error('Como máximo 400 días por vez.')
+    const r = await actualizarTasas(dias, { reemplazarImportadas: true })
+    await registrarAuditoria([{ usuario: s.email, accion: 'editar', coleccion: 'tasas', detalle: `Relleno elTOQUE desde ${desde}: ${r.detalle}` }])
+    refrescar()
+    return r.guardadas.length ? { ok: true, mensaje: r.detalle } : { ok: false, error: r.detalle }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+/** Cambia el margen sobre la tasa de elTOQUE y recalcula las tasas automáticas ya guardadas. */
+export async function guardarMargen(margen: number): Promise<Resultado> {
+  try {
+    const s = await autorizar(['admin'])
+    if (!Number.isFinite(margen) || margen < -1000 || margen > 1000) throw new Error('Margen inválido.')
+    let n = 0
+    await mutar({ settings: DEFAULT_SETTINGS, tasas: [] as import('@/lib/types').Tasa[] }, ({ settings, tasas }) => {
+      n = 0
+      const nuevas = tasas.map((t) => {
+        if (t.fuente !== 'eltoque' || !t.mercadoUsd) return t
+        n++
+        return { ...t, cupPorUsd: Math.round((t.mercadoUsd + margen) * 100) / 100 }
+      })
+      return { settings: { ...settings, margenCupUsd: margen }, tasas: nuevas }
+    })
+    await registrarAuditoria([{ usuario: s.email, accion: 'editar', coleccion: 'settings', detalle: `Margen CUP/USD = ${margen} (${n} tasas recalculadas)` }])
+    refrescar()
+    return { ok: true, mensaje: `Margen guardado. ${n} tasas de elTOQUE recalculadas.` }
+  } catch (e) {
+    return fallo(e)
+  }
+}

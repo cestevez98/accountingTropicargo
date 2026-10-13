@@ -141,7 +141,7 @@ export function importarLibro(wb: XLSX.WorkBook): ResultadoImportacion {
     const rows = filas(ws('Tasas'))
     for (let i = 1; i < rows.length; i++) {
       const f = fecha(rows[i]?.[0])
-      if (!f) continue
+      if (!f || !(num(rows[i][1]) > 0)) continue
       tasas.push({ id: `tasa-${i}`, fecha: f, cupPorUsd: num(rows[i][1]), usdPorEur: num(rows[i][2]), confirmada: false })
     }
   }

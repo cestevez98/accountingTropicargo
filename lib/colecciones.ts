@@ -232,7 +232,7 @@ export const COLECCIONES: Record<string, ColeccionConfig> = {
     key: 'tasas',
     titulo: 'Tasas de cambio',
     singular: 'tasa',
-    descripcion: 'Cada movimiento en CUP o EUR se convierte con la tasa de la fecha más reciente igual o anterior a la del movimiento. Marca «Confirmada» cuando la tasa sea la real.',
+    descripcion: 'La tasa del día se trae de elTOQUE (mercado informal) y se le suma el margen configurado. Cada movimiento en CUP o EUR se convierte con la tasa de la fecha más reciente igual o anterior a la del movimiento. Una tasa cargada a mano («manual») no la sobrescribe la actualización automática.',
     campoFecha: 'fecha',
     busqueda: [],
     rolesEditar: EDITORES,
@@ -242,6 +242,9 @@ export const COLECCIONES: Record<string, ColeccionConfig> = {
       { key: 'cupPorUsd', label: 'CUP por 1 USD', tipo: 'numero', requerido: true, tabla: true },
       { key: 'usdPorEur', label: 'USD por 1 EUR', tipo: 'numero', requerido: true, tabla: true },
       { key: 'confirmada', label: 'Confirmada', tipo: 'bool', tabla: true, filtro: true },
+      { key: 'mercadoUsd', label: 'elTOQUE USD (CUP)', tipo: 'numero', tabla: true, ayuda: 'Tasa publicada por elTOQUE, antes del margen.' },
+      { key: 'mercadoEur', label: 'elTOQUE EUR (CUP)', tipo: 'numero', tabla: true },
+      { key: 'fuente', label: 'Fuente', tipo: 'select', opciones: ['eltoque', 'manual'], tabla: true, filtro: true, defecto: 'manual' },
     ],
   },
   categorias: {

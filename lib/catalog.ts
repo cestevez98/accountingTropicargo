@@ -108,6 +108,7 @@ export const DEFAULT_SETTINGS: Settings = {
   capitalApertura: 94449.68,
   cxcSistemaApertura: 0,
   mesesCerrados: [],
+  margenCupUsd: 30,
 }
 
 export type LadoBalance = 'activo' | 'activo_nc' | 'pasivo' | 'patrimonio' | 'segun_signo'

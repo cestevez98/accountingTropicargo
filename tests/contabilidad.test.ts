@@ -168,3 +168,28 @@ describe('apertura', () => {
     expect(val(es, 'dep_acumulada', 0)).toBeCloseTo(-100)
   })
 })
+
+describe('tasa de elTOQUE', async () => {
+  const { leerRespuesta, tasaEmpresa } = await import('@/lib/fx')
+  it('lee USD y EUR (ECU) de la respuesta', () => {
+    expect(leerRespuesta({ tasas: { USD: 520, ECU: 560, MLC: 300 }, date: '2026-10-13' })).toEqual({ usd: 520, eur: 560 })
+  })
+  it('falla si no viene el USD', () => {
+    expect(() => leerRespuesta({ tasas: { ECU: 560 } })).toThrow()
+  })
+  it('suma el margen al USD y deriva el EUR por relación de mercado', () => {
+    const t = tasaEmpresa({ usd: 520, eur: 572 }, 30)
+    expect(t.cupPorUsd).toBe(550)
+    expect(t.usdPorEur).toBeCloseTo(1.1)
+  })
+})
+
+describe('tasas vacías', () => {
+  it('ignora una tasa en 0 y usa la anterior válida', () => {
+    const t = prepararTasas([
+      { id: 'a', fecha: '2026-10-12', cupPorUsd: 815, usdPorEur: 1.08, confirmada: false },
+      { id: 'b', fecha: '2026-10-13', cupPorUsd: 0, usdPorEur: 1.08, confirmada: false },
+    ])
+    expect(movUSD({ moneda: 'CUP', entrada: 815, salida: 0, fecha: '2026-10-20' }, t)).toBeCloseTo(1)
+  })
+})
