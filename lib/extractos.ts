@@ -43,6 +43,13 @@ export interface Formato {
 
 export const FORMATOS: Formato[] = [
   {
+    id: 'square-api',
+    nombre: 'Square (API)',
+    firma: ['id. square'],
+    columnas: { fecha: ['fecha'], concepto: ['concepto'], detalle: ['detalle'], importe: ['importe'], moneda: ['moneda'], referencia: ['id. square'] },
+    fecha: 'YMD',
+  },
+  {
     id: 'paypal',
     nombre: 'PayPal (actividad)',
     firma: ['gross|bruto', 'net|neto'],

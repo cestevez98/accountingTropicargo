@@ -838,6 +838,29 @@ export async function traerPayPal(desde: string, hasta: string): Promise<{ ok: t
   }
 }
 
+/**
+ * Extracto de la cuenta Square por API: cobros (brutos), comisiones y reembolsos. Se añaden como salidas las
+ * transferencias de Square que ya están en Truist (concepto «Square Inc»): son el dinero que sale del saldo de Square.
+ */
+export async function traerSquare(desde: string, hasta: string): Promise<{ ok: true; tabla: import('@/lib/extractos').Tabla } | { ok: false; error: string }> {
+  try {
+    await autorizar(['admin', 'contador'])
+    if (!esFecha(desde) || !esFecha(hasta) || desde > hasta) throw new Error('Rango de fechas inválido.')
+    if ((Date.parse(hasta) - Date.parse(desde)) / 86400000 > 400) throw new Error('Como máximo 400 días por consulta.')
+    const { transaccionesSquare } = await import('@/lib/square')
+    const { cargarDataset } = await import('@/lib/data')
+    const [tabla, ds] = await Promise.all([transaccionesSquare(desde, hasta), cargarDataset()])
+    for (const m of ds.movimientos) {
+      if (m.cuenta !== 'Truist' || m.fecha < desde || m.fecha > hasta || !/square\s+inc/i.test(m.concepto) || !(m.entrada > m.salida)) continue
+      tabla.filas.push([m.fecha, `Transferencia a Truist · ${m.concepto}`, 'Sale del saldo de Square (según el extracto de Truist)', -(m.entrada - m.salida), 'USD', `truist-${m.id}`])
+    }
+    tabla.filas.sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+    return { ok: true, tabla }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
 // ---------------------------------------------------------------- Tracking Premium
 
 export type { CambioFacturaTP, ConciliacionCobrosTP, SyncTP } from '@/lib/sync-tp'

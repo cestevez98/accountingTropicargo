@@ -2,7 +2,7 @@
 
 import { useRouter } from 'next/navigation'
 import { useMemo, useState, useTransition } from 'react'
-import { confirmarExtracto, prepararExtracto, traerPayPal, type DatosExtracto } from '@/app/acciones'
+import { confirmarExtracto, prepararExtracto, traerPayPal, traerSquare, type DatosExtracto } from '@/app/acciones'
 import {
   FORMATOS,
   FORMATO_OFX,
@@ -32,10 +32,12 @@ export function ImportadorExtractos({
   cuentas,
   categorias,
   paypalApi,
+  squareApi,
 }: {
   cuentas: string[]
   categorias: { grupo: string; nombres: string[] }[]
   paypalApi: boolean
+  squareApi: boolean
 }) {
   const router = useRouter()
   const [cuenta, setCuenta] = useState('')
@@ -67,13 +69,18 @@ export function ImportadorExtractos({
   const [rangoApi, setRangoApi] = useState({ desde: new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10), hasta: new Date().toISOString().slice(0, 10) })
   const [trayendo, startApi] = useTransition()
 
-  function traerDePayPal() {
+  // Cuentas que se pueden traer directamente por API en vez de subir el archivo.
+  const API = { PayPal: { traer: traerPayPal, activa: paypalApi, falta: 'Falta configurar las credenciales «Live» de la app de PayPal.' }, Square: { traer: traerSquare, activa: squareApi, falta: 'Falta configurar el token de Square (SQUARE_ACCESS_TOKEN).' } } as const
+  const api = cuenta in API ? API[cuenta as keyof typeof API] : null
+
+  function traerDeApi() {
+    if (!api) return
     setMsg(null)
     startApi(async () => {
-      const r = await traerPayPal(rangoApi.desde, rangoApi.hasta)
+      const r = await api.traer(rangoApi.desde, rangoApi.hasta)
       if (!r.ok) return setMsg({ ok: false, t: r.error })
-      if (!r.tabla.filas.length) return setMsg({ ok: false, t: 'PayPal no devolvió movimientos en ese período.' })
-      cargarTabla(`PayPal API ${rangoApi.desde} a ${rangoApi.hasta}`, r.tabla)
+      if (!r.tabla.filas.length) return setMsg({ ok: false, t: `${cuenta} no devolvió movimientos en ese período.` })
+      cargarTabla(`${cuenta} API ${rangoApi.desde} a ${rangoApi.hasta}`, r.tabla)
     })
   }
 
@@ -233,9 +240,9 @@ export function ImportadorExtractos({
           />
           {!cuenta && <p className="mt-1 text-xs text-slate-400">Elige primero la cuenta.</p>}
         </div>
-        {cuenta === 'PayPal' && (
+        {api && (
           <div className="flex flex-wrap items-end gap-3 rounded-md bg-marca-50 p-3 md:col-span-3">
-            <div className="text-sm font-medium text-marca-900">…o tráelo directamente de PayPal (API):</div>
+            <div className="text-sm font-medium text-marca-900">…o tráelo directamente de {cuenta} (API):</div>
             <div>
               <label className="etiqueta">Desde</label>
               <input type="date" className="input" value={rangoApi.desde} onChange={(e) => setRangoApi({ ...rangoApi, desde: e.target.value })} />
@@ -244,10 +251,10 @@ export function ImportadorExtractos({
               <label className="etiqueta">Hasta</label>
               <input type="date" className="input" value={rangoApi.hasta} onChange={(e) => setRangoApi({ ...rangoApi, hasta: e.target.value })} />
             </div>
-            <button className="btn btn-primario" disabled={!paypalApi || trayendo} onClick={traerDePayPal}>
-              {trayendo ? 'Consultando PayPal…' : 'Traer de PayPal'}
+            <button className="btn btn-primario" disabled={!api.activa || trayendo} onClick={traerDeApi}>
+              {trayendo ? `Consultando ${cuenta}…` : `Traer de ${cuenta}`}
             </button>
-            {!paypalApi && <span className="text-xs text-slate-500">Falta configurar las credenciales «Live» de la app de PayPal.</span>}
+            {!api.activa && <span className="text-xs text-slate-500">{api.falta}</span>}
           </div>
         )}
       </section>

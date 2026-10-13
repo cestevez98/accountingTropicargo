@@ -120,3 +120,22 @@ KIARA I SOLINO,6512,10/07/2026,10/06/2026,Ref: 55432866279209905617350,"AMAZON M
     expect(String(ls[0].extra.MCC)).toBe('5815')
   })
 })
+
+describe('Square (API)', () => {
+  it('reconoce el extracto que arma la API y separa cobro y comisión', () => {
+    const tabla = {
+      encabezados: ['Fecha', 'Concepto', 'Detalle', 'Importe', 'Moneda', 'Id. Square'],
+      filas: [
+        ['2026-10-13', 'INV22314 Pago Square · a@b.com', 'Pago de la factura INV22314', 146.47, 'USD', 'u0v'],
+        ['2026-10-13', 'Comisión Square INV22314', 'Pago u0v', -4.55, 'USD', 'u0v-fee'],
+      ],
+    }
+    const f = detectarFormato(tabla)
+    expect(f?.id).toBe('square-api')
+    const lineas = convertir(tabla, mapear(tabla, f), { fecha: f!.fecha })
+    expect(lineas.map((l) => [l.fecha, l.importe, l.referencia])).toEqual([
+      ['2026-10-13', 146.47, 'u0v'],
+      ['2026-10-13', -4.55, 'u0v-fee'],
+    ])
+  })
+})
