@@ -19,7 +19,7 @@ export interface Manifest {
 }
 
 interface Backend {
-  leerManifest(): Promise<{ manifest: Manifest; etag: string | null }>
+  leerManifest(paraEscribir?: boolean): Promise<{ manifest: Manifest; etag: string | null }>
   escribirManifest(m: Manifest, etag: string | null): Promise<boolean>
   leerBlob(p: string): Promise<Buffer | null>
   escribirBlob(p: string, data: Buffer): Promise<void>
@@ -67,12 +67,30 @@ class FileBackend implements Backend {
 
 class BlobBackend implements Backend {
   private blob = import('@vercel/blob')
-  async leerManifest() {
-    const { get } = await this.blob
-    const r = await get('db/manifest.json', { access: 'private', useCache: false })
-    if (!r || !r.stream) return { manifest: VACIO, etag: null }
-    const txt = await new Response(r.stream).text()
-    return { manifest: JSON.parse(txt) as Manifest, etag: r.blob.etag }
+  async leerManifest(paraEscribir = false) {
+    const { get, head, BlobNotFoundError } = await this.blob
+    if (!paraEscribir) {
+      const r = await get('db/manifest.json', { access: 'private', useCache: false })
+      if (!r || !r.stream) return { manifest: VACIO, etag: null }
+      return { manifest: JSON.parse(await new Response(r.stream).text()) as Manifest, etag: null }
+    }
+    // El etag válido para `ifMatch` es el que devuelve la API (head), no la cabecera HTTP de la descarga.
+    // Se lee head → contenido → head, y si cambió en medio se repite: así etag y contenido corresponden.
+    for (let i = 0; i < 4; i++) {
+      let antes: string
+      try {
+        antes = (await head('db/manifest.json')).etag
+      } catch (e) {
+        if (e instanceof BlobNotFoundError) return { manifest: VACIO, etag: null }
+        throw e
+      }
+      const r = await get('db/manifest.json', { access: 'private', useCache: false })
+      if (!r || !r.stream) return { manifest: VACIO, etag: null }
+      const txt = await new Response(r.stream).text()
+      const despues = (await head('db/manifest.json')).etag
+      if (antes === despues) return { manifest: JSON.parse(txt) as Manifest, etag: despues }
+    }
+    throw new Error('No se pudo leer el manifiesto de datos de forma consistente.')
   }
   async escribirManifest(m: Manifest, etag: string | null) {
     const { put, BlobPreconditionFailedError } = await this.blob
@@ -117,7 +135,7 @@ let manifestCache: { manifest: Manifest; etag: string | null; t: number } | null
 
 async function manifest(fresco = false) {
   if (!fresco && manifestCache && Date.now() - manifestCache.t < 1500) return manifestCache
-  const r = await backend.leerManifest()
+  const r = await backend.leerManifest(fresco)
   manifestCache = { ...r, t: Date.now() }
   return manifestCache
 }

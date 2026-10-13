@@ -13,7 +13,8 @@ export interface Opciones {
 type Valores = Record<string, unknown>
 
 function valorInicial(c: Campo, r: Valores | null, plantilla: Valores | null): string | boolean {
-  const v = r?.[c.key] ?? plantilla?.[c.key] ?? c.defecto
+  const hoy = !r && c.tipo === 'fecha' && c.requerido ? new Date().toISOString().slice(0, 10) : undefined
+  const v = r?.[c.key] ?? plantilla?.[c.key] ?? c.defecto ?? hoy
   if (c.tipo === 'bool') return Boolean(v)
   if (c.tipo === 'lista') return Array.isArray(v) ? v.join(', ') : String(v ?? '')
   return v == null ? '' : String(v)
