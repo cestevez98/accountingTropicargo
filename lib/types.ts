@@ -215,6 +215,8 @@ export interface Settings {
   mesesCerrados: string[]
   /** CUP que se suman a la tasa de elTOQUE para obtener la tasa de la empresa. */
   margenCupUsd: number
+  /** USD que vale 1 EUR en las cajas (la oficina toma el euro 1×1). Al cambiarlo a mercado, la diferencia es ingreso financiero. */
+  eurCajaUsd: number
   /** Última actualización automática de la tasa (ISO) y su resultado. */
   ultimaTasaAuto?: { ts: string; ok: boolean; detalle: string }
 }

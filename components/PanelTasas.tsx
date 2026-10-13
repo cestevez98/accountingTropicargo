@@ -2,11 +2,12 @@
 
 import { useRouter } from 'next/navigation'
 import { useState, useTransition } from 'react'
-import { actualizarTasaHoy, guardarMargen, rellenarTasas } from '@/app/acciones'
+import { actualizarTasaHoy, guardarEurCaja, guardarMargen, rellenarTasas } from '@/app/acciones'
 
 export function PanelTasas({
   token,
   margen,
+  eurCaja,
   ultima,
   hoy,
   vigente,
@@ -16,6 +17,7 @@ export function PanelTasas({
 }: {
   token: boolean
   margen: number
+  eurCaja: number
   ultima?: { ts: string; ok: boolean; detalle: string }
   hoy: string
   vigente?: { fecha: string; cupPorUsd: number; mercadoUsd?: number; fuente?: string }
@@ -28,6 +30,7 @@ export function PanelTasas({
   const [pendiente, start] = useTransition()
   const [m, setM] = useState(String(margen))
   const [desde, setDesde] = useState(fechaInicio)
+  const [eur, setEur] = useState(String(eurCaja))
 
   const correr = (f: () => Promise<{ ok: true; mensaje?: string } | { ok: false; error: string }>) =>
     start(async () => {
@@ -81,6 +84,19 @@ export function PanelTasas({
           )}
         </div>
         <p className="mt-1 text-xs text-slate-400">Tasa de la empresa = tasa de elTOQUE + margen. Al cambiarlo se recalculan las tasas automáticas ya guardadas.</p>
+        <label className="etiqueta mt-3">Euro en las cajas (USD por 1 EUR)</label>
+        <div className="flex gap-2">
+          <input type="number" step="0.01" value={eur} onChange={(e) => setEur(e.target.value)} disabled={!esAdmin} className="input !w-28" />
+          {esAdmin && (
+            <button className="btn" disabled={pendiente || Number(eur) === eurCaja} onClick={() => correr(() => guardarEurCaja(Number(eur)))}>
+              Guardar
+            </button>
+          )}
+        </div>
+        <p className="mt-1 text-xs text-slate-400">
+          En la oficina el euro se toma 1×1 con el dólar. Al cambiarlo, la diferencia con lo que se recibe queda como ingreso financiero («Cambio de divisas»). En
+          los bancos el EUR se convierte a la tasa de mercado.
+        </p>
         {puedeActualizar && (
           <button className="btn btn-primario mt-3" disabled={pendiente || !token} onClick={() => correr(actualizarTasaHoy)}>
             {pendiente ? 'Consultando…' : 'Traer la tasa de hoy ahora'}

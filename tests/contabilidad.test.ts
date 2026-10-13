@@ -194,3 +194,26 @@ describe('tasas vacías', () => {
     expect(movUSD({ moneda: 'CUP', entrada: 815, salida: 0, fecha: '2026-10-20' }, t)).toBeCloseTo(1)
   })
 })
+
+describe('euro en caja 1×1 y cambio de divisas', () => {
+  it('el EUR de caja vale 1 USD y al cambiarlo la diferencia es ingreso financiero', () => {
+    const ds = base({
+      tasas: [{ id: 't', fecha: '2026-07-01', cupPorUsd: 500, usdPorEur: 1.08, confirmada: true }],
+      movimientos: [
+        mov({ cuenta: 'Caja Cuba', moneda: 'EUR', categoria: 'Cobro cliente', entrada: 100 }),
+        mov({ cuenta: 'Caja Cuba', moneda: 'EUR', categoria: 'Cambio de divisas', salida: 100, fecha: '2026-08-10' }),
+        mov({ cuenta: 'Caja Cuba', moneda: 'USD', categoria: 'Cambio de divisas', entrada: 108, fecha: '2026-08-10' }),
+      ],
+    })
+    const { er, es, mayor } = informes(ds)
+    expect(mayor.usd.get(ds.movimientos[0].id)).toBeCloseTo(100)
+    expect(val(er, 'res:Cambio de divisas')).toBeCloseTo(8)
+    expect(val(er, 'neta')).toBeCloseTo(8)
+    for (const v of es.cuadre) expect(Math.abs(v)).toBeLessThan(0.005)
+  })
+  it('en un banco el EUR va a la tasa de mercado', () => {
+    const ds = base({ movimientos: [mov({ cuenta: 'Revolut', moneda: 'EUR', categoria: 'Cobro cliente', entrada: 100 })] })
+    const { mayor } = informes(ds)
+    expect(mayor.usd.get(ds.movimientos[0].id)).toBeCloseTo(110)
+  })
+})

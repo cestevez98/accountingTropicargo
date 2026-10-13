@@ -113,7 +113,7 @@ const GRUPOS_ER_ORDEN: { grupo: GrupoER; titulo: string; total: string }[] = [
   { grupo: 'INGRESOS', titulo: 'I. INGRESOS', total: 'TOTAL INGRESOS' },
   { grupo: 'COSTO DE VENTAS', titulo: 'II. COSTO DE VENTAS', total: 'TOTAL COSTO DE VENTAS' },
   { grupo: 'GASTOS OPERATIVOS', titulo: 'III. GASTOS OPERATIVOS', total: 'TOTAL GASTOS OPERATIVOS' },
-  { grupo: 'GASTOS FINANCIEROS', titulo: 'IV. GASTOS FINANCIEROS', total: 'TOTAL GASTOS FINANCIEROS' },
+  { grupo: 'GASTOS FINANCIEROS', titulo: 'IV. RESULTADO FINANCIERO (cambio de divisas, financiamiento)', total: 'TOTAL RESULTADO FINANCIERO' },
   { grupo: 'IMPUESTOS', titulo: 'V. IMPUESTOS', total: 'TOTAL IMPUESTOS' },
 ]
 

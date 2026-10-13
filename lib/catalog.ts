@@ -60,7 +60,7 @@ const DEFS: Def[] = [
   ['Préstamo Nextplus', 'NO AFECTA ER', 'Financiación', 'interco_nextplus'],
   ['Deuda Nextplus', 'NO AFECTA ER', 'Financiación', 'interco_nextplus'],
 
-  ['Cambio de divisas', 'NO AFECTA ER', 'Interno', 'transito'],
+  ['Cambio de divisas', 'GASTOS FINANCIEROS', 'Interno', 'resultado', 'Las dos patas del cambio (lo que sale y lo que entra) dejan como neto la ganancia o pérdida por tasa de cambio'],
   ['Traspaso entre cajas', 'NO AFECTA ER', 'Interno', 'transito'],
   ['Depósito bancario', 'NO AFECTA ER', 'Interno', 'transito'],
   ['Pago Tarjeta de Credito', 'NO AFECTA ER', 'Interno', 'transito', 'Pago de la tarjeta desde un banco: movimiento interno'],
@@ -109,6 +109,7 @@ export const DEFAULT_SETTINGS: Settings = {
   cxcSistemaApertura: 0,
   mesesCerrados: [],
   margenCupUsd: 30,
+  eurCajaUsd: 1,
 }
 
 export type LadoBalance = 'activo' | 'activo_nc' | 'pasivo' | 'patrimonio' | 'segun_signo'

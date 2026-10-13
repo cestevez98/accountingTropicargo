@@ -94,8 +94,11 @@ export function construirMayor(ds: Dataset): Mayor {
 
   // 2) Movimientos de tesorería.
   let sinTasa = 0
+  const tipoCuenta = new Map(ds.cuentas.map((c) => [c.nombre, c.tipo]))
+  const eurCaja = Number(ds.settings.eurCajaUsd) || 1
   for (const m of ds.movimientos) {
-    const v = movUSD(m, tasas)
+    // En las cajas el euro se toma 1×1 (configurable); en bancos, a la tasa de mercado.
+    const v = movUSD(m, tasas, tipoCuenta.get(m.cuenta) === 'caja' ? eurCaja : undefined)
     if (!Number.isFinite(v)) {
       sinTasa++
       continue

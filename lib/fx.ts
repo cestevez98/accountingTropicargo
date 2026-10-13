@@ -28,10 +28,14 @@ export function tasaVigente(tabla: TablaTasas, fecha: string): Tasa | undefined 
   return tasas[idx < 0 ? 0 : idx]
 }
 
-/** Importe del movimiento en USD (entrada − salida convertida). NaN si no hay tasa para convertir. */
-export function movUSD(m: Pick<Movimiento, 'moneda' | 'entrada' | 'salida' | 'fecha' | 'tasa'>, tabla: TablaTasas): number {
+/**
+ * Importe del movimiento en USD (entrada − salida convertida). NaN si no hay tasa para convertir.
+ * `eurFijo`: si se indica (cajas), el EUR se valora a esa tasa fija en lugar de la de mercado.
+ */
+export function movUSD(m: Pick<Movimiento, 'moneda' | 'entrada' | 'salida' | 'fecha' | 'tasa'>, tabla: TablaTasas, eurFijo?: number): number {
   const neto = (Number(m.entrada) || 0) - (Number(m.salida) || 0)
   if (m.moneda === 'USD' || !m.moneda) return neto
+  if (m.moneda === 'EUR' && !m.tasa && eurFijo) return neto * eurFijo
   const t = tasaVigente(tabla, m.fecha)
   if (m.moneda === 'CUP') {
     const r = m.tasa || t?.cupPorUsd

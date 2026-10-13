@@ -66,6 +66,7 @@ export default async function RegistrosPage({ params, searchParams }: { params: 
         <PanelTasas
           token={tokenConfigurado()}
           margen={ds.settings.margenCupUsd}
+          eurCaja={ds.settings.eurCajaUsd ?? 1}
           ultima={ds.settings.ultimaTasaAuto}
           hoy={hoyCuba()}
           vigente={tasaVigente(prepararTasas(ds.tasas), hoyCuba())}

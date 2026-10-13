@@ -593,3 +593,17 @@ export async function confirmarExtracto(
     return fallo(e)
   }
 }
+
+/** USD que vale 1 EUR en las cajas (por defecto 1, el euro se toma 1×1 en la oficina). */
+export async function guardarEurCaja(valor: number): Promise<Resultado> {
+  try {
+    const s = await autorizar(['admin'])
+    if (!Number.isFinite(valor) || valor <= 0 || valor > 5) throw new Error('Valor inválido.')
+    await mutar({ settings: DEFAULT_SETTINGS }, ({ settings }) => ({ settings: { ...settings, eurCajaUsd: valor } }))
+    await registrarAuditoria([{ usuario: s.email, accion: 'editar', coleccion: 'settings', detalle: `EUR en caja = ${valor} USD` }])
+    refrescar()
+    return { ok: true, mensaje: `El euro en caja vale ahora ${valor} USD.` }
+  } catch (e) {
+    return fallo(e)
+  }
+}
