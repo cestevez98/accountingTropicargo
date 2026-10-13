@@ -212,7 +212,19 @@ export interface Producto {
   unidad?: string
   /** Costo de referencia (USD) cuando no hay compras registradas. */
   costoUSD?: number
+  /** Precio base de venta en CUP (Price del TPV). */
   precioCUP?: number
+  /** Precio por grupo de precios del TPV («1»…«8» = Price1…Price8). Cada tienda usa el grupo de sus áreas. */
+  precios?: Record<string, number>
+  /** Costo en CUP según el TPV (Cost). */
+  costoCUP?: number
+  /** Códigos de barras (Barcode, Barcode2, Barcode3 del TPV). */
+  barras?: string[]
+  /** Foto del producto (URL, p. ej. de MiBarcode) y descripción para la web. */
+  imagen?: string
+  descripcion?: string
+  /** Fecha en que se cambió aquí (catálogo maestro): queda pendiente de pasar al TPV. */
+  modificado?: string
   /** Existencia que traía el Excel o el último conteo (referencia). */
   existenciaRef?: number
 }
@@ -223,6 +235,56 @@ export interface Distribucion {
   pctReinversion: number
   pctInversionista: number
   ajusteInversionista?: number
+}
+
+/** Línea de un conteo: lo que contó el trabajador (sin ver la existencia del sistema). */
+export interface LineaConteo {
+  codigo: string
+  nombre: string
+  cantidad: number
+  /** Código escaneado que no está en el catálogo (se identificó con MiBarcode o a mano). */
+  desconocido?: boolean
+}
+
+/** Conteo físico diario a ciegas de una tienda (con escáner). */
+export interface Conteo {
+  id: string
+  numero: number
+  tienda: string
+  fecha: string
+  usuario: string
+  nombreUsuario?: string
+  estado: 'abierto' | 'cerrado'
+  inicio: string
+  cierre?: string
+  lineas: LineaConteo[]
+  /** Al cerrar: lo contado contra la existencia del TPV en ese momento (solo lo ve administración). */
+  resultado?: { codigo: string; nombre: string; contado: number; sistema: number; diferencia: number; costoUSD?: number }[]
+  /** Si no se pudo leer el TPV al cerrar. */
+  errorSistema?: string
+  nota?: string
+}
+
+/** Arqueo de caja: efectivo contado por denominaciones contra lo que debería haber. */
+export interface Arqueo {
+  id: string
+  numero: number
+  tienda: string
+  fecha: string
+  ts: string
+  usuario: string
+  nombreUsuario?: string
+  cajero?: string
+  /** Billetes y monedas contados. */
+  detalle: { moneda: Moneda; valor: number; cantidad: number }[]
+  /** Sueltos u otros importes por moneda (monedas fraccionarias, vales…). */
+  otros?: Partial<Record<Moneda, number>>
+  contado: Partial<Record<Moneda, number>>
+  /** Saldo de la caja según Kaluch (cobros del TPV − gastos − entregas) al momento del arqueo. */
+  esperado: Partial<Record<Moneda, number>>
+  /** Si el esperado no incluye lo último del TPV (no se pudo leer). */
+  avisoEsperado?: string
+  nota?: string
 }
 
 export interface Settings {
@@ -237,6 +299,8 @@ export interface Settings {
   margenMinimo: number
   pctReinversionDefecto: number
   pctInversionistaDefecto: number
+  /** Margen de la Tienda Web sobre el costo del Almacén Central (fracción). */
+  margenWeb?: number
   axispos?: {
     url: string
     usuario: string
@@ -248,7 +312,7 @@ export interface Settings {
     /** Último día traído del TPV, por área. */
     ultimoDia?: Record<string, string>
     /** Áreas que devolvió la central la última vez (para asignarlas a las tiendas). */
-    ubicaciones?: { code: string; nombre: string; grupo?: string; tipo?: number }[]
+    ubicaciones?: { code: string; nombre: string; grupo?: string; tipo?: number; precioGrupo?: number }[]
     /** Proveedores del TPV (código y nombre). */
     proveedores?: { code: string; nombre: string }[]
     /** Usuario de AxisPOS con el que se firman las operaciones que se suben. */
@@ -261,7 +325,7 @@ export interface Settings {
   mesesCerrados: string[]
 }
 
-export type Rol = 'propietario' | 'admin' | 'comercial' | 'contador_tienda' | 'contador_fiscal' | 'lectura'
+export type Rol = 'propietario' | 'admin' | 'comercial' | 'contador_tienda' | 'dependiente' | 'contador_fiscal' | 'lectura'
 
 export interface Usuario {
   id: string
@@ -309,6 +373,8 @@ export interface Dataset {
   productos: Producto[]
   distribuciones: Distribucion[]
   importaciones: Importacion[]
+  conteos: Conteo[]
+  arqueos: Arqueo[]
   /** Totales guardados del ER del último Excel importado por tienda (para la comparación). */
   referencias: Record<string, { meses: string[]; er: Record<string, number[]>; archivo: string }>
 }

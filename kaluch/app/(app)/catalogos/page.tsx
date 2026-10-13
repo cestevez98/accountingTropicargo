@@ -1,5 +1,6 @@
-import { accionCategoria, accionProducto, accionSettings, accionTienda, accionUsuario, accionVaciar } from '../../acciones'
+import { accionCategoria, accionSettings, accionTienda, accionUsuario, accionVaciar } from '../../acciones'
 import { FormAccion } from '@/components/FormAccion'
+import { FormProducto } from './FormProducto'
 import { Chip, Encabezado, Paginador, Pestanas, url } from '@/components/ui'
 import { puedeRegistrar, requerirUsuario } from '@/lib/auth'
 import { ETIQUETA_CUENTA, LINEA_LABEL, TIPO_ENTIDAD_LABEL } from '@/lib/catalogo'
@@ -7,6 +8,8 @@ import { cargarDataset, leerAuditoria, leerUsuarios } from '@/lib/data'
 import { params, type SP } from '@/lib/pagina'
 import { ROLES, ROLES_LISTA } from '@/lib/permisos'
 import type { Categoria, Tienda } from '@/lib/types'
+import { prepararTasas, tasaVigente } from '@/lib/fx'
+import { GRUPOS_PRECIO, gruposPorTienda, precioEnTienda, precioWeb } from '@/lib/sincro'
 
 const FLUJO = { explotacion: 'Explotación', inversion: 'Inversión', financiacion: 'Financiación', interno: 'Interno' }
 
@@ -111,15 +114,58 @@ export default async function Catalogos({ searchParams }: { searchParams: SP }) 
     )
   } else if (tab === 'productos') {
     const q = sp.q?.toUpperCase()
-    const filas = ds.productos.filter((p) => !q || p.nombre.includes(q) || p.codigo.toUpperCase().includes(q)).sort((a, b) => a.nombre.localeCompare(b.nombre))
+    const soloPendientes = sp.f === 'pendientes'
+    const filas = ds.productos
+      .filter((p) => (!q || p.nombre.includes(q) || p.codigo.toUpperCase().includes(q)) && (!soloPendientes || p.modificado))
+      .sort((a, b) => a.nombre.localeCompare(b.nombre))
+    const pendientes = ds.productos.filter((p) => p.modificado).length
     const pagina = Math.max(1, Number(sp.p) || 1)
+    const grupos = gruposPorTienda(ds.tiendas, ds.settings.axispos?.ubicaciones)
+    const locales = ds.tiendas.filter((t) => t.activa && grupos.has(t.id))
+    const hoyT = tasaVigente(prepararTasas(ds.tasas, ds.settings.margenTasa), new Date().toISOString().slice(0, 10))
+    const web = ds.tiendas.find((t) => t.tipo === 'web')
+    const sel = sp.id ? ds.productos.find((p) => p.nombre === sp.id) : undefined
+    // Lo escaneado en los conteos que no casa con ningún producto: candidatos a darse de alta.
+    const conocidos = new Set(ds.productos.flatMap((p) => [p.codigo, ...(p.barras ?? [])]))
+    const desconocidos = [
+      ...new Map(
+        ds.conteos.flatMap((c) => c.lineas.filter((l) => l.desconocido && !conocidos.has(l.codigo)).map((l) => [l.codigo, { codigo: l.codigo, nombre: l.nombre.replace(/ \(no está en el catálogo\)$/, ''), tienda: ds.tiendas.find((t) => t.id === c.tienda)?.nombre ?? c.tienda, fecha: c.fecha }] as const)),
+      ).values(),
+    ]
+    // Grupos de precio con al menos una tienda; se etiquetan con sus tiendas.
+    const etiquetaGrupo = new Map<string, string>()
+    for (const t of locales) etiquetaGrupo.set(grupos.get(t.id)!, [etiquetaGrupo.get(grupos.get(t.id)!), t.nombre].filter(Boolean).join(', '))
     cuerpo = (
       <>
-        <form action="/catalogos" className="mb-3 flex gap-2">
+        <form action="/catalogos" className="mb-3 flex flex-wrap items-center gap-2">
           <input type="hidden" name="tab" value="productos" />
           <input name="q" defaultValue={sp.q} placeholder="Buscar producto" className="input max-w-sm" />
+          <label className="flex items-center gap-1 text-sm">
+            <input type="checkbox" name="f" value="pendientes" defaultChecked={soloPendientes} /> Solo cambiados aquí ({pendientes})
+          </label>
           <button className="btn">Buscar</button>
         </form>
+        {desconocidos.length > 0 && editar && (
+          <details className="tarjeta mb-3 p-3">
+            <summary className="cursor-pointer text-sm font-semibold">Códigos escaneados en los conteos que no están en el catálogo ({desconocidos.length})</summary>
+            <ul className="mt-2 divide-y divide-border text-sm">
+              {desconocidos.map((d) => (
+                <li key={d.codigo} className="flex items-center gap-3 py-1">
+                  <span className="w-36 font-mono text-xs">{d.codigo}</span>
+                  <span className="flex-1">{d.nombre}</span>
+                  <span className="text-xs text-muted-foreground">{d.tienda} · {d.fecha}</span>
+                  <a className="text-xs text-primary hover:underline" href={`${url('/catalogos', { tab: 'productos' }, { barras: d.codigo })}#editar`}>
+                    Dar de alta
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+        <p className="mb-3 text-xs text-muted-foreground">
+          Catálogo maestro: los cambios se hacen aquí y quedan pendientes de pasar al TPV. Mientras la integración esté en solo lectura no se envía nada; en Sincronización → Catálogo se ve qué cambiaría en AxisPOS.
+          {web && ds.settings.margenWeb == null ? ' Define el margen de la Tienda Web en Configuración para ver su precio.' : ''}
+        </p>
         <div className="tarjeta overflow-x-auto">
           <table className="tabla">
             <thead>
@@ -127,22 +173,43 @@ export default async function Catalogos({ searchParams }: { searchParams: SP }) 
                 <th>Código</th>
                 <th>Nombre</th>
                 <th>Grupo</th>
-                <th>Unidad</th>
-                <th className="num">Costo ref. USD</th>
-                <th className="num">Precio CUP</th>
-                <th className="num">Existencia (Excel)</th>
+                <th className="num">Costo USD</th>
+                <th className="num">Precio base</th>
+                {locales.map((t) => (
+                  <th key={t.id} className="num">
+                    {t.nombre}
+                  </th>
+                ))}
+                {web && ds.settings.margenWeb != null && <th className="num">Web</th>}
+                <th />
               </tr>
             </thead>
             <tbody>
               {filas.slice((pagina - 1) * 100, pagina * 100).map((p) => (
                 <tr key={p.nombre}>
                   <td className="text-xs text-muted-foreground">{p.codigo !== p.nombre ? p.codigo : ''}</td>
-                  <td>{p.nombre}</td>
-                  <td>{p.grupo}</td>
-                  <td>{p.unidad}</td>
+                  <td>
+                    {p.nombre} {p.modificado && <Chip tono="ambar" title={`Cambiado aquí el ${p.modificado.slice(0, 10)}`}>Pendiente TPV</Chip>}
+                  </td>
+                  <td className="text-xs">{p.grupo}</td>
                   <td className="num">{p.costoUSD ?? ''}</td>
                   <td className="num">{p.precioCUP ?? ''}</td>
-                  <td className="num">{p.existenciaRef ?? ''}</td>
+                  {locales.map((t) => {
+                    const g = grupos.get(t.id)!
+                    return (
+                      <td key={t.id} className={`num ${p.precios?.[g] ? '' : 'text-muted-foreground'}`}>
+                        {precioEnTienda(p, g) ?? ''}
+                      </td>
+                    )
+                  })}
+                  {web && ds.settings.margenWeb != null && <td className="num">{precioWeb(p, ds.settings.margenWeb, hoyT?.cupUsd) ?? ''}</td>}
+                  <td>
+                    {editar && (
+                      <a className="text-xs text-primary hover:underline" href={url('/catalogos', sp, { id: p.nombre })}>
+                        Editar
+                      </a>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -150,32 +217,9 @@ export default async function Catalogos({ searchParams }: { searchParams: SP }) 
         </div>
         <Paginador pagina={pagina} total={filas.length} porPagina={100} base={(p) => url('/catalogos', sp, { p })} />
         {editar && (
-          <div className="tarjeta mt-4 p-4">
-            <h2 className="text-sm font-semibold">Nuevo producto / editar por nombre</h2>
-            <FormAccion accion={accionProducto} className="mt-3">
-              <div className="grid gap-3 sm:grid-cols-6">
-                <label>
-                  <span className="etiqueta">Código</span>
-                  <input name="codigo" className="input" />
-                </label>
-                <label className="sm:col-span-2">
-                  <span className="etiqueta">Nombre</span>
-                  <input name="nombre" className="input" required />
-                </label>
-                <label>
-                  <span className="etiqueta">Grupo</span>
-                  <input name="grupo" className="input" />
-                </label>
-                <label>
-                  <span className="etiqueta">Costo ref. USD</span>
-                  <input name="costoUSD" inputMode="decimal" className="input" />
-                </label>
-                <label>
-                  <span className="etiqueta">Precio CUP</span>
-                  <input name="precioCUP" inputMode="decimal" className="input" />
-                </label>
-              </div>
-            </FormAccion>
+          <div className="tarjeta mt-4 p-4" id="editar">
+            <h2 className="text-sm font-semibold">{sel ? `Editar ${sel.nombre}` : 'Nuevo producto'}</h2>
+            <FormProducto sel={sel} barrasInicial={sp.barras} grupos={GRUPOS_PRECIO.filter((g) => etiquetaGrupo.has(g) || sel?.precios?.[g]).map((g) => ({ g, etiqueta: etiquetaGrupo.get(g) ?? `grupo ${g}` }))} />
           </div>
         )}
       </>
@@ -246,7 +290,7 @@ export default async function Catalogos({ searchParams }: { searchParams: SP }) 
                 </select>
               </label>
               <label>
-                <span className="etiqueta">Tiendas (contador de tienda)</span>
+                <span className="etiqueta">Tienda (contador de tienda o dependiente)</span>
                 <select name="tiendas" multiple defaultValue={sel?.tiendas ?? []} className="input h-24">
                   {ds.tiendas.map((t) => (
                     <option key={t.id} value={t.id}>
@@ -290,6 +334,10 @@ export default async function Catalogos({ searchParams }: { searchParams: SP }) 
               <label>
                 <span className="etiqueta">Margen mínimo por producto (%)</span>
                 <input name="margenMinimo" defaultValue={st.margenMinimo * 100} className="input" />
+              </label>
+              <label>
+                <span className="etiqueta">Margen de la Tienda Web sobre el costo del central (%)</span>
+                <input name="margenWeb" defaultValue={st.margenWeb != null ? st.margenWeb * 100 : ''} placeholder="Sin definir" className="input" />
               </label>
               <label>
                 <span className="etiqueta">% reinversión por defecto</span>

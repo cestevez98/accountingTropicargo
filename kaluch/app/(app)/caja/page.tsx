@@ -2,7 +2,8 @@ import { accionBorrar, accionMovimiento, accionReclasificar } from '../../accion
 import { BotonAccion, FormAccion } from '@/components/FormAccion'
 import { Filtros } from '@/components/Filtros'
 import { Chip, Encabezado, Importe, Paginador, Pestanas, url, Vacio } from '@/components/ui'
-import { puedeRegistrar, requerirUsuario } from '@/lib/auth'
+import { puedeRegistrar, requerirUsuario, tiendaFija } from '@/lib/auth'
+import { CuadreCajas } from './Cuadre'
 import { CAT_POR_CLASIFICAR } from '@/lib/catalogo'
 import { cargarContabilidad } from '@/lib/data'
 import { hoy } from '@/lib/fecha'
@@ -16,6 +17,13 @@ export default async function CajaBanco({ searchParams }: { searchParams: SP }) 
   const libro = sp.libro === 'banco' ? 'banco' : 'caja'
   const { tienda } = await tiendaActiva(s)
   const { ds, mayor } = await cargarContabilidad()
+  if (sp.libro === 'cuadre')
+    return (
+      <>
+        <Encabezado titulo="Caja y Banco" descripcion="Cuadre diario de las cajas de los mercados y entregas de efectivo a la caja central." />
+        <CuadreCajas ds={ds} sp={sp} tiendaFija={tiendaFija(s)} registrar={puedeRegistrar(s, 'caja')} />
+      </>
+    )
   const nombreT = new Map(ds.tiendas.map((t) => [t.id, t.nombre]))
   const soloFiscal = s.rol === 'contador_fiscal'
   const q = sp.q?.toUpperCase()
@@ -59,6 +67,7 @@ export default async function CajaBanco({ searchParams }: { searchParams: SP }) 
         items={[
           { clave: 'caja', label: 'Caja', href: '/caja' },
           { clave: 'banco', label: 'Banco', href: '/caja?libro=banco' },
+          { clave: 'cuadre', label: 'Cuadre de cajas', href: '/caja?libro=cuadre' },
         ]}
       />
       {registrar && (

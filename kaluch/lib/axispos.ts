@@ -1,5 +1,6 @@
 import 'server-only'
 import { gunzipSync, gzipSync } from 'node:zlib'
+import type { ItemTPV } from './sincro'
 import type { Compra, Moneda, Movimiento, Salida, Tienda } from './types'
 
 /**
@@ -197,13 +198,13 @@ export class ClienteAxis {
   }
 
   /** Ubicaciones (áreas/almacenes) del tenant: su Code es el ObjectCode de las operaciones. */
-  async ubicaciones(): Promise<{ Code: string; Name: string; Type?: number; CurrencyName?: string; Group?: string; DeletedDb?: number }[]> {
+  async ubicaciones(): Promise<{ Code: string; Name: string; Type?: number; CurrencyName?: string; Group?: string; DeletedDb?: number; PriceGroup?: number }[]> {
     const j = (await this.pedir('ImportExportLocations', { method: 'POST', cuerpo: { data: [] } })) as { data?: [] } | null
     return j?.data ?? []
   }
 
   /** Catálogo completo de mercancías. */
-  async mercancias(): Promise<{ Code: string; Name: string; Category?: string; Unit?: string; Cost?: number; Price?: number; Currency?: string }[]> {
+  async mercancias(): Promise<ItemTPV[]> {
     const j = (await this.pedir('ImportExportItems', { method: 'POST', cuerpo: { data: [], groups: [] } })) as { data?: [] } | null
     return j?.data ?? []
   }

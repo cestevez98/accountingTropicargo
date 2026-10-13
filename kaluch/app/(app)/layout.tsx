@@ -15,11 +15,14 @@ const NAV: { href: string; label: string; clave: Seccion }[] = [
   { href: '/caja', label: 'Caja y Banco', clave: 'caja' },
   { href: '/deudas', label: 'Deudas', clave: 'deudas' },
   { href: '/inventario', label: 'Inventario', clave: 'inventario' },
+  { href: '/conteo', label: 'Conteo', clave: 'conteo' },
+  { href: '/arqueo', label: 'Arqueo', clave: 'arqueo' },
   { href: '/reportes', label: 'Reportes', clave: 'reportes' },
   { href: '/contabilidad', label: 'Contabilidad', clave: 'contabilidad' },
   { href: '/tasas', label: 'Tasas de cambio', clave: 'tasas' },
   { href: '/catalogos', label: 'Catálogos', clave: 'catalogos' },
   { href: '/integraciones', label: 'Integraciones', clave: 'integraciones' },
+  { href: '/sincronizacion', label: 'Sincronización', clave: 'integraciones' },
   { href: '/alertas', label: 'Alertas', clave: 'alertas' },
 ]
 

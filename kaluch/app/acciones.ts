@@ -5,8 +5,11 @@ import { cookies } from 'next/headers'
 import { redirect } from 'next/navigation'
 import { aplicarLote } from '@/lib/aplicar'
 import { autorizar, cerrarSesion, hashPassword, iniciarSesion, tiendaFija, verificarPassword, type Sesion } from '@/lib/auth'
-import { ClienteAxis, escrituraAxis, mapaAreas, mapearOperaciones, proponerAreas, type OperacionTPV } from '@/lib/axispos'
-import { areaAlmacen, monedasConTasa, notaKA, operacionCompra, operacionTraslado, SERIE_INICIAL } from '@/lib/axispos-envio'
+import { clienteAxis, sincronizarAxis } from '@/lib/axis-servidor'
+import { escrituraAxis, mapaAreas, proponerAreas } from '@/lib/axispos'
+import { monedasConTasa, notaKA, prepararEnvioCompra, SERIE_INICIAL } from '@/lib/axispos-envio'
+import { cuadreCaja, esEntrega, GRUPOS_PRECIO, movimientosEntrega, productoDesdeItem } from '@/lib/sincro'
+import { DENOMINACIONES, resultadoConteo, totalArqueo } from '@/lib/conteo'
 import { DEFAULT_SETTINGS } from '@/lib/catalogo'
 import { cargarDataset, leerUsuarios, registrarAuditoria } from '@/lib/data'
 import { COLECCIONES_OPERATIVAS, DEFECTOS } from '@/lib/defectos'
@@ -16,7 +19,7 @@ import type { LoteKM } from '@/lib/importar-km'
 import { leerArchivo, type TipoImport } from '@/lib/plantillas'
 import { ROLES_LISTA } from '@/lib/permisos'
 import { borrarSubida, leerSubida, mutar } from '@/lib/store'
-import type { Asiento, Categoria, CategoriaPago, Compra, Dataset, Deuda, EnvioAxis, LineaER, Moneda, Movimiento, Producto, Rol, Salida, Settings, Tasa, Tienda, Usuario } from '@/lib/types'
+import type { Arqueo, Asiento, Categoria, Conteo, LineaConteo, CategoriaPago, Compra, Dataset, Deuda, EnvioAxis, LineaER, Moneda, Movimiento, Producto, Rol, Salida, Settings, Tasa, Tienda, Usuario } from '@/lib/types'
 
 export type Resultado = { ok: true; mensaje?: string } | { ok: false; error: string }
 
@@ -327,7 +330,10 @@ export async function accionBorrar(_prev: Resultado | null, form: FormData): Pro
     const fija = tiendaFija(s)
     if (fija && reg.tienda !== fija) throw new Error('Solo puedes borrar registros de tu tienda.')
     comprobarMes(s, ds.settings, reg.fecha)
-    await mutar({ [col]: [] } as Record<string, { id: string }[]>, (actual) => ({ [col]: actual[col].filter((x) => x.id !== id) }))
+    // Una entrega a la caja central son dos movimientos con el mismo comprobante: se borran juntos.
+    const comp = col === 'movimientos' && esEntrega(reg as unknown as Movimiento) ? (reg as unknown as Movimiento).comprobante : undefined
+    const fuera = (x: { id: string }) => x.id === id || (comp != null && esEntrega(x as unknown as Movimiento) && (x as unknown as Movimiento).comprobante === comp)
+    await mutar({ [col]: [] } as Record<string, { id: string }[]>, (actual) => ({ [col]: actual[col].filter((x) => !fuera(x)) }))
     await registrarAuditoria([{ usuario: s.email, accion: 'borrar', coleccion: col, ref: id, detalle: JSON.stringify(reg).slice(0, 300) }])
     refrescar()
     return { ok: true, mensaje: 'Borrado.' }
@@ -389,6 +395,7 @@ export async function accionSettings(_prev: Resultado | null, form: FormData): P
       margenTasa: numero(form, 'margenTasa')!,
       impuestoVentas: pct('impuestoVentas'),
       margenMinimo: pct('margenMinimo'),
+      margenWeb: str(form, 'margenWeb') ? pct('margenWeb') : undefined,
       pctReinversionDefecto: pct('pctReinversionDefecto'),
       pctInversionistaDefecto: pct('pctInversionistaDefecto'),
       revaluar: form.get('revaluar') === 'on',
@@ -503,11 +510,36 @@ export async function accionProducto(_prev: Resultado | null, form: FormData): P
     const s = await autorizar('catalogos')
     const nombre = str(form, 'nombre').toUpperCase()
     if (!nombre) throw new Error('Falta el nombre.')
-    const p: Producto = { codigo: str(form, 'codigo') || nombre, nombre, grupo: str(form, 'grupo') || undefined, unidad: str(form, 'unidad') || undefined, costoUSD: numero(form, 'costoUSD', false), precioCUP: numero(form, 'precioCUP', false) }
-    await mutar({ productos: [] as Producto[] }, ({ productos }) => ({ productos: productos.some((x) => x.nombre === nombre) ? productos.map((x) => (x.nombre === nombre ? { ...x, ...p } : x)) : [...productos, p] }))
-    await registrarAuditoria([{ usuario: s.email, accion: 'guardar', coleccion: 'productos', ref: nombre }])
+    const precios: Record<string, number> = {}
+    for (const g of GRUPOS_PRECIO) {
+      const v = numero(form, `precio${g}`, false)
+      if (v != null && v > 0) precios[g] = v
+    }
+    const original = str(form, 'original').toUpperCase() || nombre
+    const p: Partial<Producto> & { codigo: string; nombre: string } = {
+      codigo: str(form, 'codigo') || nombre,
+      nombre,
+      grupo: str(form, 'grupo').toUpperCase() || undefined,
+      unidad: str(form, 'unidad') || undefined,
+      costoUSD: numero(form, 'costoUSD', false),
+      precioCUP: numero(form, 'precioCUP', false),
+      precios: Object.keys(precios).length ? precios : undefined,
+      barras: [...new Set(str(form, 'barras').split(/[,\s]+/).filter(Boolean))].slice(0, 3),
+      imagen: /^https:\/\//.test(str(form, 'imagen')) ? str(form, 'imagen') : undefined,
+      descripcion: str(form, 'descripcion') || undefined,
+      modificado: new Date().toISOString(),
+    }
+    if (!p.barras?.length) p.barras = undefined
+    await mutar({ productos: [] as Producto[] }, ({ productos }) => {
+      if (original !== nombre && productos.some((x) => x.nombre === nombre)) throw new Error(`Ya hay un producto «${nombre}».`)
+      const repetido = p.barras?.map((b) => [b, productos.find((x) => x.nombre !== original && (x.barras?.includes(b) || x.codigo === b))] as const).find(([, x]) => x)
+      if (repetido) throw new Error(`El código ${repetido[0]} ya es de «${repetido[1]!.nombre}».`)
+      const existe = productos.some((x) => x.nombre === original)
+      return { productos: existe ? productos.map((x) => (x.nombre === original ? { ...x, ...p } : x)) : [...productos, p] }
+    })
+    await registrarAuditoria([{ usuario: s.email, accion: 'guardar', coleccion: 'productos', ref: nombre, detalle: original !== nombre ? `antes ${original}` : undefined }])
     refrescar()
-    return { ok: true, mensaje: 'Producto guardado.' }
+    return { ok: true, mensaje: 'Producto guardado. Queda pendiente de pasar al TPV (Sincronización → Catálogo).' }
   } catch (e) {
     return fallo(e)
   }
@@ -697,6 +729,171 @@ export async function accionVaciar(_prev: Resultado | null, form: FormData): Pro
   }
 }
 
+/** Entrega de efectivo de un mercado a la caja central: salida de su caja y entrada en la de Casa Matriz. */
+export async function accionEntregaCaja(_prev: Resultado | null, form: FormData): Promise<Resultado> {
+  try {
+    const ds = await cargarDataset()
+    const s = await autorizar('caja', str(form, 'tienda'))
+    const tienda = tiendaDe(s, form, ds)
+    const t = ds.tiendas.find((x) => x.id === tienda)!
+    const matriz = ds.tiendas.find((x) => x.tipo === 'matriz')
+    if (!matriz) throw new Error('No hay Casa Matriz dada de alta.')
+    if (t.tipo !== 'local') throw new Error('Las entregas son de la caja de un mercado.')
+    const monto = numero(form, 'monto')!
+    if (!(monto > 0)) throw new Error('El monto debe ser mayor que 0.')
+    const f = fecha(form)
+    comprobarMes(s, ds.settings, f)
+    const movs = movimientosEntrega({ id: uid(), fecha: f, tienda, nombreTienda: t.nombre, matriz: matriz.id, moneda: moneda(form), monto, cajero: str(form, 'cajero') || undefined, nota: str(form, 'nota') || undefined })
+    await mutar({ movimientos: [] as Movimiento[] }, ({ movimientos }) => ({ movimientos: [...movimientos, ...movs] }))
+    await registrarAuditoria([{ usuario: s.email, accion: 'entrega a caja central', coleccion: 'movimientos', ref: movs[0].comprobante, detalle: `${t.nombre} ${monto} ${movs[0].moneda}` }])
+    refrescar()
+    return { ok: true, mensaje: `Entrega de ${t.nombre} registrada (${movs[0].comprobante}).` }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+// ---------------------------------------------------------------- conteo a ciegas y arqueo
+
+function lineasDe(form: FormData): LineaConteo[] {
+  let crudo: unknown
+  try {
+    crudo = JSON.parse(String(form.get('lineas') ?? '[]'))
+  } catch {
+    throw new Error('Lista de conteo no válida.')
+  }
+  if (!Array.isArray(crudo)) throw new Error('Lista de conteo no válida.')
+  return crudo
+    .map((l) => ({ codigo: String(l?.codigo ?? '').trim(), nombre: String(l?.nombre ?? '').slice(0, 200), cantidad: Number(l?.cantidad), ...(l?.desconocido ? { desconocido: true } : {}) }))
+    .filter((l) => l.codigo && Number.isFinite(l.cantidad) && l.cantidad >= 0)
+    .slice(0, 5000)
+}
+
+/** Abre el conteo del día de la tienda (si ya hay uno abierto, se sigue con ese). */
+export async function accionConteoAbrir(_prev: Resultado | null, form: FormData): Promise<Resultado> {
+  try {
+    const ds = await cargarDataset()
+    const s = await autorizar('conteo', str(form, 'tienda'))
+    const tienda = tiendaDe(s, form, ds)
+    let creado = false
+    await mutar({ conteos: [] as Conteo[] }, ({ conteos }) => {
+      if (conteos.some((c) => c.tienda === tienda && c.estado === 'abierto')) return { conteos }
+      creado = true
+      const numero = conteos.reduce((m, c) => Math.max(m, c.numero), 0) + 1
+      const ahora = new Date().toISOString()
+      return { conteos: [{ id: uid(), numero, tienda, fecha: ahora.slice(0, 10), usuario: s.email, nombreUsuario: s.nombre, estado: 'abierto' as const, inicio: ahora, lineas: [] }, ...conteos] }
+    })
+    if (creado) await registrarAuditoria([{ usuario: s.email, accion: 'abrir conteo', coleccion: 'conteos', ref: tienda }])
+    refrescar()
+    return { ok: true, mensaje: creado ? 'Conteo abierto. Escanea los productos.' : 'Ya había un conteo abierto en esta tienda: sigue con él.' }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+/** Guarda lo contado hasta ahora (el conteo sigue abierto). */
+export async function accionConteoGuardar(_prev: Resultado | null, form: FormData): Promise<Resultado> {
+  try {
+    const ds = await cargarDataset()
+    const c = ds.conteos.find((x) => x.id === str(form, 'id'))
+    if (!c) throw new Error('El conteo ya no existe.')
+    await autorizar('conteo', c.tienda)
+    const lineas = lineasDe(form)
+    await mutar({ conteos: [] as Conteo[] }, ({ conteos }) => {
+      const x = conteos.find((y) => y.id === c.id)
+      if (x?.estado !== 'abierto') throw new Error('El conteo ya está cerrado.')
+      return { conteos: conteos.map((y) => (y.id === c.id ? { ...y, lineas } : y)) }
+    })
+    return { ok: true, mensaje: `Guardado: ${lineas.length} productos.` }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+/**
+ * Cierra el conteo: guarda lo contado y lo compara con la existencia del TPV en ese momento
+ * (solo se LEE del TPV). El trabajador no ve el resultado; administración sí.
+ */
+export async function accionConteoCerrar(_prev: Resultado | null, form: FormData): Promise<Resultado> {
+  try {
+    const ds = await cargarDataset()
+    const c = ds.conteos.find((x) => x.id === str(form, 'id'))
+    if (!c) throw new Error('El conteo ya no existe.')
+    const s = await autorizar('conteo', c.tienda)
+    if (c.estado !== 'abierto') throw new Error('El conteo ya está cerrado.')
+    const lineas = lineasDe(form)
+    if (!lineas.length) throw new Error('No hay nada contado.')
+    const areas = (ds.tiendas.find((t) => t.id === c.tienda)?.codigoTPV ?? '').split(',').map((x) => x.trim()).filter(Boolean)
+    let resultado: Conteo['resultado']
+    let errorSistema: string | undefined
+    try {
+      if (!areas.length) throw new Error('La tienda no tiene áreas del TPV asignadas.')
+      resultado = resultadoConteo(lineas, await clienteAxis(ds).existencias(areas), areas, ds.productos)
+    } catch (e) {
+      errorSistema = e instanceof Error ? e.message : String(e)
+    }
+    const cierre = new Date().toISOString()
+    await mutar({ conteos: [] as Conteo[] }, ({ conteos }) => ({
+      conteos: conteos.map((y) => (y.id === c.id ? { ...y, lineas, estado: 'cerrado' as const, cierre, resultado, errorSistema, nota: str(form, 'nota') || undefined } : y)),
+    }))
+    const dif = resultado?.filter((r) => r.diferencia).length ?? 0
+    await registrarAuditoria([{ usuario: s.email, accion: 'cerrar conteo', coleccion: 'conteos', ref: `#${c.numero}`, detalle: `${lineas.length} productos${resultado ? `, ${dif} con diferencia` : `; sin comparar: ${errorSistema}`}` }])
+    refrescar()
+    return { ok: true, mensaje: `Conteo #${c.numero} cerrado: ${lineas.length} productos contados. Gracias.` }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+/**
+ * Arqueo de la caja de un mercado. El esperado sale de la caja en Kaluch tras traer lo último
+ * de esa tienda desde el TPV (solo lectura). Devuelve el id para abrir el comprobante.
+ */
+export async function accionArqueo(_prev: Resultado | null, form: FormData): Promise<Resultado & { id?: string }> {
+  try {
+    const ds0 = await cargarDataset()
+    const s = await autorizar('arqueo', str(form, 'tienda'))
+    const tienda = tiendaDe(s, form, ds0)
+    const detalle: Arqueo['detalle'] = []
+    const otros: Arqueo['otros'] = {}
+    for (const [mon, valores] of Object.entries(DENOMINACIONES) as [Moneda, number[]][]) {
+      for (const v of valores) {
+        const n = numero(form, `${mon}_${v}`, false)
+        if (n != null && n !== 0) {
+          if (!(n > 0) || !Number.isInteger(n)) throw new Error(`Cantidad de billetes de ${v} ${mon} no válida.`)
+          detalle.push({ moneda: mon, valor: v, cantidad: n })
+        }
+      }
+      const o = numero(form, `${mon}_otros`, false)
+      if (o) otros[mon] = o
+    }
+    const contado = totalArqueo(detalle, otros)
+    // Lo último del TPV de esta tienda, para que el esperado incluya los cobros de hoy.
+    let avisoEsperado: string | undefined
+    if (ds0.settings.axispos?.url)
+      try {
+        await sincronizarAxis({ modo: 'novedades', usuario: `${s.email} (arqueo)`, mesesCerradosEditables: false, tiendas: [tienda] })
+      } catch (e) {
+        avisoEsperado = `No se pudo leer el TPV; el esperado llega hasta la última sincronización (${e instanceof Error ? e.message : String(e)}).`
+      }
+    const ds = await cargarDataset()
+    const ahora = new Date()
+    const fechaHoy = ahora.toISOString().slice(0, 10)
+    const esperado = cuadreCaja(ds.movimientos, tienda, fechaHoy, fechaHoy).saldoFinal as Arqueo['esperado']
+    const id = uid()
+    let numeroArqueo = 0
+    await mutar({ arqueos: [] as Arqueo[] }, ({ arqueos }) => {
+      numeroArqueo = arqueos.reduce((m, a) => Math.max(m, a.numero), 0) + 1
+      return { arqueos: [{ id, numero: numeroArqueo, tienda, fecha: fechaHoy, ts: ahora.toISOString(), usuario: s.email, nombreUsuario: s.nombre, cajero: str(form, 'cajero') || undefined, detalle, otros, contado, esperado, avisoEsperado, nota: str(form, 'nota') || undefined }, ...arqueos] }
+    })
+    await registrarAuditoria([{ usuario: s.email, accion: 'arqueo', coleccion: 'arqueos', ref: `#${numeroArqueo}`, detalle: JSON.stringify(contado) }])
+    refrescar()
+    return { ok: true, mensaje: `Arqueo #${numeroArqueo} guardado.`, id }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
 // ---------------------------------------------------------------- AxisPOS: lo que se sube
 
 /** Manda al TPV la tasa de la tienda (Toque + margen) del USD, EUR y MLC del día indicado. */
@@ -725,35 +922,14 @@ export async function accionAxisEnviarTasa(_prev: Resultado | null, form: FormDa
 async function enviarCompraAxis(id: string): Promise<Resultado> {
   if (!escrituraAxis()) return { ok: false, error: 'Integración en modo solo lectura: no se envía nada a AxisPOS.' }
   const ds = await cargarDataset()
-  const cfg = ds.settings.axispos
-  const compra = ds.compras.find((c) => c.id === id)
-  if (!compra) throw new Error('La compra ya no existe.')
-  if (compra.tienda !== 'almacen') throw new Error('Solo se suben al TPV las compras del Almacén Central.')
-  const central = ds.tiendas.find((t) => t.id === 'almacen')
-  const areaCentral = areaAlmacen(central, cfg?.ubicaciones)
-  if (!areaCentral) throw new Error('El Almacén Central no tiene asignada su área del TPV (Integraciones).')
-  if (!cfg?.usuarioCodigo) throw new Error('Falta el usuario de AxisPOS con el que se firman las operaciones (Integraciones → Probar conexión).')
-  const traslados = compra.grupo ? ds.salidas.filter((x) => x.grupo === compra.grupo && x.tipo === 'traslado') : []
-  const ctx = { areaCentral, usuario: cfg.usuarioCodigo, productos: new Map(ds.productos.map((p) => [p.nombre, p])), tabla: prepararTasas(ds.tasas, ds.settings.margenTasa) }
+  const { docs, siguiente } = prepararEnvioCompra(ds, id)
+  if (!docs.length) return { ok: true, mensaje: 'Ya estaba subida al TPV.' }
+  const malo = docs.find((d) => d.error)
+  if (malo) throw new Error(malo.error)
   const c = clienteAxis(ds)
-  const pendientes = [compra, ...traslados].filter((x) => !x.axis?.enviada)
-  if (!pendientes.length) return { ok: true, mensaje: 'Ya estaba subida al TPV.' }
-  const faltan = new Set(await c.documentosFaltantes(pendientes.map((x) => notaKA(x.id))))
-  let acct = cfg.siguienteAcct ?? SERIE_INICIAL
-  const numeros = new Map<string, number>()
-  const ops: OperacionTPV[] = []
-  for (const x of pendientes) {
-    if (!faltan.has(notaKA(x.id))) continue
-    const n = x.axis?.acct ?? acct++
-    numeros.set(x.id, n)
-    if ('pago' in x && 'moneda' in x && !('tipo' in x)) ops.push(operacionCompra(x as Compra, n, ctx))
-    else {
-      const t = x as Salida
-      const destino = areaAlmacen(ds.tiendas.find((d) => d.id === t.destino), cfg.ubicaciones)
-      if (!destino) throw new Error(`${ds.tiendas.find((d) => d.id === t.destino)?.nombre ?? t.destino} no tiene área del TPV asignada.`)
-      ops.push(operacionTraslado(t, n, destino, ctx))
-    }
-  }
+  const faltan = new Set(await c.documentosFaltantes(docs.map((d) => notaKA(d.id))))
+  const ops = docs.filter((d) => faltan.has(notaKA(d.id))).map((d) => d.op!)
+  const numeros = new Map(docs.map((d) => [d.id, Number(d.op!.Acct)]))
   const ahora = new Date().toISOString()
   let error: string | undefined
   if (ops.length) {
@@ -763,11 +939,11 @@ async function enviarCompraAxis(id: string): Promise<Resultado> {
       error = e instanceof Error ? e.message : String(e)
     }
   }
-  const marca = <T extends { id: string; axis?: EnvioAxis }>(x: T): T => (pendientes.some((p) => p.id === x.id) ? { ...x, axis: { acct: numeros.get(x.id) ?? x.axis?.acct ?? 0, ...(error ? { error } : { enviada: ahora }) } } : x)
+  const marca = <T extends { id: string; axis?: EnvioAxis }>(x: T): T => (numeros.has(x.id) ? { ...x, axis: { acct: numeros.get(x.id)!, ...(error ? { error } : { enviada: ahora }) } } : x)
   await mutar({ compras: [] as Compra[], salidas: [] as Salida[], settings: DEFAULT_SETTINGS }, (a) => ({
     compras: a.compras.map(marca),
     salidas: a.salidas.map(marca),
-    settings: { ...DEFAULT_SETTINGS, ...a.settings, axispos: { ...a.settings.axispos!, siguienteAcct: Math.max(acct, a.settings.axispos?.siguienteAcct ?? SERIE_INICIAL) } },
+    settings: { ...DEFAULT_SETTINGS, ...a.settings, axispos: { ...a.settings.axispos!, siguienteAcct: Math.max(siguiente, a.settings.axispos?.siguienteAcct ?? SERIE_INICIAL) } },
   }))
   if (error) return { ok: false, error }
   return { ok: true, mensaje: `Subida al TPV: ${ops.filter((o) => o.OperType === 1).length} compra y ${ops.filter((o) => o.OperType === 8).length} traslados.` }
@@ -804,12 +980,6 @@ export async function accionAxisConfig(_prev: Resultado | null, form: FormData):
   }
 }
 
-function clienteAxis(ds: Dataset) {
-  const cfg = ds.settings.axispos
-  if (!cfg?.url || !cfg.usuario) throw new Error('Configura primero la dirección del tenant y el usuario de AxisPOS.')
-  if (!process.env.AXISPOS_PASSWORD) throw new Error('Falta la variable de entorno AXISPOS_PASSWORD en Vercel.')
-  return new ClienteAxis(cfg.url, cfg.usuario, process.env.AXISPOS_PASSWORD)
-}
 
 /** Comprueba la conexión y trae las áreas del tenant para asignarlas a las tiendas. */
 const AREA_CENTRAL = '1'
@@ -820,9 +990,9 @@ export async function accionAxisProbar(_prev?: Resultado | null, _f?: FormData):
     const ds0 = await cargarDataset()
     const c = clienteAxis(ds0)
     await c.comprobar()
-    const ubic = (await c.ubicaciones()).filter((u) => !u.DeletedDb).map((u) => ({ code: String(u.Code), nombre: u.Name, grupo: u.Group, tipo: u.Type }))
+    const ubic = (await c.ubicaciones()).filter((u) => !u.DeletedDb).map((u) => ({ code: String(u.Code), nombre: u.Name, grupo: u.Group, tipo: u.Type, precioGrupo: u.PriceGroup }))
     // El área 1 (ALMACEN CENTRAL KM) nunca viaja en el catálogo de ubicaciones, pero existe: es el almacén central.
-    if (!ubic.some((u) => u.code === AREA_CENTRAL)) ubic.unshift({ code: AREA_CENTRAL, nombre: 'ALMACEN CENTRAL KM', grupo: 'CENTRAL', tipo: 3 })
+    if (!ubic.some((u) => u.code === AREA_CENTRAL)) ubic.unshift({ code: AREA_CENTRAL, nombre: 'ALMACEN CENTRAL KM', grupo: 'CENTRAL', tipo: 3, precioGrupo: undefined })
     const proveedores = (await c.socios()).filter((p) => /prov/i.test(p.Group ?? '')).map((p) => ({ code: String(p.Code), nombre: p.Name }))
     const usuarios = await c.usuarios().catch(() => [])
     const usuarioCodigo = usuarios.find((u) => u.Name?.toLowerCase() === (ds0.settings.axispos?.usuario ?? '').toLowerCase())?.Code
@@ -869,7 +1039,10 @@ export async function accionAxisArea(_prev: Resultado | null, form: FormData): P
   }
 }
 
-/** Trae el catálogo de mercancías del TPV (código, nombre, grupo, unidad, costo y precio). */
+/**
+ * Trae el catálogo de mercancías del TPV (código, nombre, grupo, unidad, costo, precio base y por grupo).
+ * Lo que se haya cambiado aquí y esté pendiente de pasar al TPV no se pisa: el maestro es Kaluch.
+ */
 export async function accionAxisProductos(_prev?: Resultado | null, _f?: FormData): Promise<Resultado> {
   try {
     const s = await autorizar('integraciones')
@@ -877,109 +1050,48 @@ export async function accionAxisProductos(_prev?: Resultado | null, _f?: FormDat
     const items = await clienteAxis(ds).mercancias()
     const tabla = prepararTasas(ds.tasas, ds.settings.margenTasa)
     const t = tasaVigente(tabla, new Date().toISOString().slice(0, 10))
+    let respetados = 0
     await mutar({ productos: [] as Producto[] }, ({ productos }) => {
-      const m = new Map(productos.map((p) => [p.nombre, p]))
+      const porNombre = new Map(productos.map((p) => [p.nombre, p]))
+      const porCodigo = new Map(productos.filter((p) => p.codigo !== p.nombre).map((p) => [p.codigo, p]))
+      const fuera = new Set<Producto>()
+      const nuevos: Producto[] = []
       for (const it of items) {
         if (!it.Name) continue
+        const previo = porCodigo.get(String(it.Code)) ?? porNombre.get(it.Name)
+        if (previo?.modificado) {
+          respetados++
+          continue
+        }
         const cupo = (it.Currency ?? 'CUP').toUpperCase() === 'USD' ? undefined : t?.cupUsd
-        const costoUSD = it.Cost ? (cupo ? it.Cost / cupo : it.Cost) : undefined
-        m.set(it.Name, { ...m.get(it.Name), codigo: String(it.Code), nombre: it.Name, grupo: it.Category || undefined, unidad: it.Unit || undefined, ...(costoUSD ? { costoUSD: Math.round(costoUSD * 1e4) / 1e4 } : {}), ...(it.Price ? { precioCUP: it.Price } : {}) })
+        const costoUSD = it.Cost ? (cupo ? it.Cost / cupo : it.Cost) : previo?.costoUSD
+        if (previo) fuera.add(previo)
+        nuevos.push({ ...productoDesdeItem(it, previo), ...(costoUSD ? { costoUSD: Math.round(costoUSD * 1e4) / 1e4 } : {}) })
       }
-      return { productos: [...m.values()] }
+      return { productos: [...productos.filter((p) => !fuera.has(p)), ...nuevos] }
     })
-    await registrarAuditoria([{ usuario: s.email, accion: 'traer catálogo', coleccion: 'axispos', detalle: `${items.length} mercancías` }])
+    await registrarAuditoria([{ usuario: s.email, accion: 'traer catálogo', coleccion: 'axispos', detalle: `${items.length} mercancías${respetados ? `, ${respetados} cambiados aquí sin tocar` : ''}` }])
     refrescar()
-    return { ok: true, mensaje: `${items.length} mercancías del TPV actualizadas en el catálogo.` }
+    return { ok: true, mensaje: `${items.length} mercancías del TPV en el catálogo.${respetados ? ` ${respetados} cambiados aquí y pendientes de pasar al TPV no se tocaron.` : ''}` }
   } catch (e) {
     return fallo(e)
   }
 }
 
-/**
- * Trae las operaciones del TPV.
- * - «novedades»: desde las marcas de agua guardadas de cada tienda (solo lo nuevo, sin duplicar).
- * - «rango»: un rango de fechas; sustituye lo traído antes del TPV en esas fechas.
- * Las marcas solo avanzan si todo se guardó bien.
- */
+/** Trae las operaciones del TPV («novedades» o un «rango» de fechas que sustituye lo traído antes). */
 export async function accionAxisSync(_prev: Resultado | null, form: FormData): Promise<Resultado> {
   try {
     const s = await autorizar('integraciones')
-    const ds = await cargarDataset()
     const modo = str(form, 'modo') === 'rango' ? 'rango' : 'novedades'
-    const desde = modo === 'rango' ? fecha(form, 'desde') : undefined
-    const hasta = modo === 'rango' ? fecha(form, 'hasta') : undefined
-    if (desde && hasta && hasta < desde) throw new Error('El rango de fechas está al revés.')
-    const tiendas = ds.tiendas.filter((t) => t.codigoTPV)
-    if (!tiendas.length) throw new Error('Ninguna tienda tiene asignada su área del TPV (ObjectCode).')
-    const cfg = ds.settings.axispos!
-    const c = clienteAxis(ds)
-    const ops = []
-    const caja = []
-    const inicio = cfg.desde ?? ds.settings.fechaInicio
-    const hoyISO = new Date().toISOString().slice(0, 10)
-    const ultimo: Record<string, string> = { ...cfg.ultimoDia }
-    for (const t of tiendas)
-      for (const area of (t.codigoTPV ?? '').split(',').map((x) => x.trim()).filter(Boolean)) {
-        // Novedades: desde el día anterior a la última pasada (recoge lo que llegó tarde) hasta hoy.
-        // Lo repetido se descarta por tienda + ticket + fecha. Las marcas de agua de la central no se
-        // usan porque un área sin movimiento devuelve -1, y pedir desde 0 traería todo el historial.
-        let d = desde
-        if (modo === 'novedades') {
-          const u = cfg.ultimoDia?.[area]
-          d = u ? new Date(Date.parse(`${u}T00:00:00Z`) - 86400000).toISOString().slice(0, 10) : inicio
-          if (d < inicio) d = inicio
-        }
-        const r = await c.exportarOperaciones(area, { desde: d, hasta: modo === 'rango' ? hasta : hoyISO })
-        ops.push(...r.operaciones)
-        caja.push(...r.caja)
-        if (modo === 'novedades') ultimo[area] = hoyISO
-      }
-    const tabla = prepararTasas(ds.tasas, ds.settings.margenTasa)
-    const m = mapearOperaciones(ops, caja, ds.tiendas, (f) => tasaVigente(tabla, f)?.cupUsd ?? 0, { cobros: Boolean(cfg.cobros), cuentaBanco: cfg.cuentaBanco })
-    const loteId = uid()
-    const fechas = [...m.salidas, ...m.compras, ...m.movimientos].map((x) => x.fecha)
-    comprobarMes(s, ds.settings, ...fechas)
-    let nuevas = { salidas: 0, compras: 0, movimientos: 0 }
-    await mutar({ salidas: [] as Salida[], compras: [] as Compra[], movimientos: [] as Movimiento[], settings: DEFAULT_SETTINGS }, (a) => {
-      const marca = <T extends object>(arr: T[]) => arr.map((x) => ({ ...x, id: uid(), lote: loteId }))
-      if (modo === 'rango') {
-        const fuera = (x: { origen?: string; fecha: string }) => !(x.origen === 'tpv' && x.fecha >= desde! && x.fecha <= hasta!)
-        nuevas = { salidas: m.salidas.length, compras: m.compras.length, movimientos: m.movimientos.length }
-        return {
-          salidas: [...a.salidas.filter(fuera), ...marca(m.salidas)],
-          compras: [...a.compras.filter(fuera), ...marca(m.compras)],
-          movimientos: [...a.movimientos.filter(fuera), ...marca(m.movimientos)],
-          settings: { ...DEFAULT_SETTINGS, ...a.settings, axispos: { ...a.settings.axispos!, ultimoSync: new Date().toISOString() } },
-        }
-      }
-      // Novedades: se descartan las operaciones (tienda + ticket + fecha) que ya estén guardadas.
-      const ya = new Set(a.salidas.filter((x) => x.origen === 'tpv').map((x) => `${x.tienda}|${x.operacion}|${x.fecha}`))
-      const yaC = new Set(a.compras.filter((x) => x.origen === 'tpv').map((x) => `${x.tienda}|${x.factura}|${x.fecha}`))
-      const kM = (x: Movimiento) => `${x.libro}|${x.tienda}|${x.fecha}|${x.concepto}|${x.tipo}|${x.moneda}|${x.monto}`
-      const yaM = new Map<string, number>()
-      for (const x of a.movimientos) if (x.origen === 'tpv') yaM.set(kM(x), (yaM.get(kM(x)) ?? 0) + 1)
-      const sal = m.salidas.filter((x) => !ya.has(`${x.tienda}|${x.operacion}|${x.fecha}`))
-      const com = m.compras.filter((x) => !yaC.has(`${x.tienda}|${x.factura}|${x.fecha}`))
-      const mov = m.movimientos.filter((x) => {
-        const n = yaM.get(kM(x)) ?? 0
-        if (n > 0) yaM.set(kM(x), n - 1)
-        return n === 0
-      })
-      nuevas = { salidas: sal.length, compras: com.length, movimientos: mov.length }
-      return {
-        salidas: [...a.salidas, ...marca(sal)],
-        compras: [...a.compras, ...marca(com)],
-        movimientos: [...a.movimientos, ...marca(mov)],
-        settings: { ...DEFAULT_SETTINGS, ...a.settings, axispos: { ...a.settings.axispos!, ultimoSync: new Date().toISOString(), ultimoDia: ultimo } },
-      }
+    const mensaje = await sincronizarAxis({
+      modo,
+      desde: modo === 'rango' ? fecha(form, 'desde') : undefined,
+      hasta: modo === 'rango' ? fecha(form, 'hasta') : undefined,
+      usuario: s.email,
+      mesesCerradosEditables: s.rol === 'propietario',
     })
-    const ign = [...m.ignorados.entries()].map(([k, v]) => `${v} ${k}`).join(', ')
-    await registrarAuditoria([{ usuario: s.email, accion: 'sincronizar', coleccion: 'axispos', detalle: `${modo}${desde ? ` ${desde}…${hasta}` : ''}: ${ops.length} operaciones, ${caja.length} asientos de caja → ${JSON.stringify(nuevas)}` }])
     refrescar()
-    return {
-      ok: true,
-      mensaje: `${ops.length} operaciones del TPV: ${nuevas.salidas} líneas de venta/salida, ${nuevas.compras} de compra y ${nuevas.movimientos} movimientos de caja/banco.${m.sinTienda ? ` ${m.sinTienda} de áreas sin tienda.` : ''}${ign ? ` No contabilizadas todavía: ${ign}.` : ''}`,
-    }
+    return { ok: true, mensaje }
   } catch (e) {
     return fallo(e)
   }

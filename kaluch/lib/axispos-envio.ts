@@ -1,6 +1,6 @@
-import { tasaTiendaVenta, tasaVigente, type TablaTasas } from './fx'
+import { prepararTasas, tasaTiendaVenta, tasaVigente, type TablaTasas } from './fx'
 import type { OperacionTPV } from './axispos'
-import type { Compra, Producto, Salida, Tienda } from './types'
+import type { Compra, Dataset, EnvioAxis, Producto, Salida, Tienda } from './types'
 
 /**
  * Lo que este sistema sube a AxisPOS: la tasa de la tienda y las compras del Almacén Central con
@@ -103,4 +103,52 @@ export function operacionTraslado(s: Salida, acct: number, destinoArea: string, 
     Items: [{ ItemCode: codigo, ItemName: s.producto, Qtty: s.cantidad, Discount: 0, Price: pv, PriceIn: unit, AmountTotal: Math.round(pv * s.cantidad * 100) / 100 }],
     Payments: [],
   }
+}
+
+export interface DocumentoEnvio {
+  id: string
+  tipo: 'compra' | 'traslado'
+  op?: OperacionTPV
+  error?: string
+}
+
+/**
+ * Lo que se subiría al TPV para una compra del Almacén Central: la compra (operación 1) y los traslados
+ * de su distribución (operación 8). No toca la red: lo usan el ensayo y el envío.
+ * Los números de documento son provisionales (serie propia desde `acct`).
+ */
+export function prepararEnvioCompra(ds: Pick<Dataset, 'compras' | 'salidas' | 'tiendas' | 'productos' | 'tasas' | 'settings'>, id: string, acct = ds.settings.axispos?.siguienteAcct ?? SERIE_INICIAL) {
+  const cfg = ds.settings.axispos
+  const compra = ds.compras.find((c) => c.id === id)
+  if (!compra) throw new Error('La compra ya no existe.')
+  if (compra.tienda !== 'almacen') throw new Error('Solo se suben al TPV las compras del Almacén Central.')
+  const areaCentral = areaAlmacen(ds.tiendas.find((t) => t.id === 'almacen'), cfg?.ubicaciones)
+  if (!areaCentral) throw new Error('El Almacén Central no tiene asignada su área del TPV (Integraciones).')
+  if (!cfg?.usuarioCodigo) throw new Error('Falta el usuario de AxisPOS con el que se firman las operaciones (Integraciones → Probar conexión).')
+  const traslados = compra.grupo ? ds.salidas.filter((x) => x.grupo === compra.grupo && x.tipo === 'traslado') : []
+  const ctx = { areaCentral, usuario: cfg.usuarioCodigo, productos: new Map(ds.productos.map((p) => [p.nombre, p])), tabla: prepararTasas(ds.tasas, ds.settings.margenTasa) }
+  const docs: DocumentoEnvio[] = []
+  let n = acct
+  const intenta = (doc: Omit<DocumentoEnvio, 'op' | 'error'>, f: (acct: number) => OperacionTPV, previo?: EnvioAxis) => {
+    if (previo?.enviada) return
+    try {
+      docs.push({ ...doc, op: f(previo?.acct || n++) })
+    } catch (e) {
+      docs.push({ ...doc, error: e instanceof Error ? e.message : String(e) })
+    }
+  }
+  intenta({ id: compra.id, tipo: 'compra' }, (a) => operacionCompra(compra, a, ctx), compra.axis)
+  for (const t of traslados) {
+    const tienda = ds.tiendas.find((d) => d.id === t.destino)
+    intenta(
+      { id: t.id, tipo: 'traslado' },
+      (a) => {
+        const destino = areaAlmacen(tienda, cfg.ubicaciones)
+        if (!destino) throw new Error(`${tienda?.nombre ?? t.destino} no tiene área del TPV asignada.`)
+        return operacionTraslado(t, a, destino, ctx)
+      },
+      t.axis,
+    )
+  }
+  return { compra, docs, siguiente: n }
 }

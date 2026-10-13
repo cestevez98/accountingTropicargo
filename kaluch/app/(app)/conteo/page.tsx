@@ -1,0 +1,149 @@
+import { accionConteoAbrir } from '../../acciones'
+import { FormAccion } from '@/components/FormAccion'
+import { Chip, Encabezado, Vacio, url } from '@/components/ui'
+import { requerirUsuario, tiendaFija } from '@/lib/auth'
+import { catalogoEscaner } from '@/lib/conteo'
+import { cargarDataset, preferencias } from '@/lib/data'
+import { params, type SP } from '@/lib/pagina'
+import { Escaner } from './Escaner'
+
+const f2 = (n: number | undefined) => (n == null ? '' : n.toLocaleString('es-ES', { maximumFractionDigits: 2 }))
+
+/** Conteo físico diario a ciegas con escáner. El trabajador cuenta; el resultado solo lo ve administración. */
+export default async function Conteo({ searchParams }: { searchParams: SP }) {
+  const s = await requerirUsuario('conteo')
+  const sp = await params(searchParams)
+  const ds = await cargarDataset()
+  const admin = s.rol === 'propietario' || s.rol === 'admin'
+  const fija = tiendaFija(s)
+  const pref = await preferencias()
+  const tiendas = ds.tiendas.filter((t) => t.activa && t.codigoTPV && (!fija || t.id === fija))
+  const tienda = fija ?? (sp.t && tiendas.some((t) => t.id === sp.t) ? sp.t : pref.tienda && tiendas.some((t) => t.id === pref.tienda) ? pref.tienda : undefined)
+  const nombreT = new Map(ds.tiendas.map((t) => [t.id, t.nombre]))
+  const abierto = tienda ? ds.conteos.find((c) => c.tienda === tienda && c.estado === 'abierto') : undefined
+  const sel = admin && sp.id ? ds.conteos.find((c) => c.id === sp.id) : undefined
+  const historia = ds.conteos.filter((c) => c.estado === 'cerrado' && (!fija || c.tienda === fija)).slice(0, 60)
+
+  if (sel?.resultado || sel?.errorSistema) {
+    const conDif = (sel.resultado ?? []).filter((r) => r.diferencia)
+    const valor = conDif.reduce((a, r) => a + r.diferencia * (r.costoUSD ?? 0), 0)
+    return (
+      <>
+        <Encabezado titulo={`Conteo #${sel.numero} · ${nombreT.get(sel.tienda)}`} descripcion={`${sel.fecha} · ${sel.nombreUsuario ?? sel.usuario} · cerrado ${sel.cierre?.slice(11, 16)} (hora UTC). Existencias del TPV leídas al cerrar.`}>
+          <a className="btn" href="/conteo">
+            Volver
+          </a>
+        </Encabezado>
+        {sel.errorSistema && <div className="tarjeta mb-3 border-l-4 border-l-danger p-3 text-sm">No se pudo comparar con el TPV: {sel.errorSistema}</div>}
+        <div className="mb-3 text-sm">
+          {sel.lineas.length} productos contados · <strong>{conDif.length}</strong> con diferencia · valor {f2(valor)} USD {sel.nota && <>· Nota: {sel.nota}</>}
+        </div>
+        <div className="tarjeta overflow-x-auto">
+          <table className="tabla">
+            <thead>
+              <tr>
+                <th>Código</th>
+                <th>Producto</th>
+                <th className="num">Contado</th>
+                <th className="num">TPV</th>
+                <th className="num">Diferencia</th>
+                <th className="num">USD</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(sel.resultado ?? sel.lineas.map((l) => ({ ...l, contado: l.cantidad, sistema: undefined, diferencia: undefined, costoUSD: undefined })))
+                .slice()
+                .sort((a, b) => Math.abs(b.diferencia ?? 0) - Math.abs(a.diferencia ?? 0))
+                .map((r) => (
+                  <tr key={r.codigo}>
+                    <td className="text-xs text-muted-foreground">{r.codigo}</td>
+                    <td>{r.nombre}</td>
+                    <td className="num">{f2(r.contado)}</td>
+                    <td className="num">{f2(r.sistema)}</td>
+                    <td className={`num font-semibold ${(r.diferencia ?? 0) < 0 ? 'text-danger' : (r.diferencia ?? 0) > 0 ? 'text-accent' : ''}`}>{f2(r.diferencia)}</td>
+                    <td className="num">{r.diferencia && r.costoUSD ? f2(r.diferencia * r.costoUSD) : ''}</td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </div>
+        <p className="mt-2 text-xs text-muted-foreground">Diferencia = contado − TPV. Negativa: falta mercancía. Si se vendió durante el conteo, el TPV ya la descontó: lo mejor es contar antes de abrir o después de cerrar.</p>
+      </>
+    )
+  }
+
+  return (
+    <>
+      <Encabezado titulo="Conteo a ciegas" descripcion="Cuenta los productos con el escáner. No se muestra lo que dice el sistema: al terminar, administración compara lo contado con el TPV." />
+      {!tiendas.length ? (
+        <Vacio>No hay tiendas con áreas del TPV asignadas.</Vacio>
+      ) : !tienda ? (
+        <div className="mb-4 flex flex-wrap gap-2">
+          {tiendas.map((t) => (
+            <a key={t.id} className="btn" href={url('/conteo', {}, { t: t.id })}>
+              {t.nombre}
+            </a>
+          ))}
+        </div>
+      ) : abierto ? (
+        <>
+          <p className="mb-3 text-sm">
+            <strong>{nombreT.get(tienda)}</strong> · conteo #{abierto.numero} abierto por {abierto.nombreUsuario ?? abierto.usuario} a las {abierto.inicio.slice(11, 16)} (UTC)
+          </p>
+          <Escaner id={abierto.id} numero={abierto.numero} inicial={abierto.lineas} catalogo={catalogoEscaner(ds.productos)} />
+        </>
+      ) : (
+        <div className="tarjeta mx-auto max-w-xl p-4">
+          <div className="text-sm">
+            Tienda: <strong>{nombreT.get(tienda)}</strong>
+            {!fija && (
+              <a className="ml-2 text-xs text-primary hover:underline" href="/conteo?t=">
+                cambiar
+              </a>
+            )}
+          </div>
+          <FormAccion accion={accionConteoAbrir} boton="Empezar conteo" claseBoton="btn btn-primario mt-3 w-full">
+            <input type="hidden" name="tienda" value={tienda} />
+          </FormAccion>
+        </div>
+      )}
+      {historia.length > 0 && (
+        <div className="tarjeta mt-6 overflow-x-auto">
+          <h2 className="px-4 pt-3 text-sm font-semibold">Conteos terminados</h2>
+          <table className="tabla">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Fecha</th>
+                <th>Tienda</th>
+                <th>Contó</th>
+                <th className="num">Productos</th>
+                {admin && <th className="num">Con diferencia</th>}
+                {admin && <th />}
+              </tr>
+            </thead>
+            <tbody>
+              {historia.map((c) => (
+                <tr key={c.id}>
+                  <td>{c.numero}</td>
+                  <td>{c.fecha}</td>
+                  <td>{nombreT.get(c.tienda)}</td>
+                  <td className="text-xs">{c.nombreUsuario ?? c.usuario}</td>
+                  <td className="num">{c.lineas.length}</td>
+                  {admin && <td className="num">{c.resultado ? c.resultado.filter((r) => r.diferencia).length : <Chip tono="rojo">Sin comparar</Chip>}</td>}
+                  {admin && (
+                    <td>
+                      <a className="text-xs text-primary hover:underline" href={url('/conteo', {}, { id: c.id })}>
+                        Ver
+                      </a>
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
+  )
+}

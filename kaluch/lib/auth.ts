@@ -78,12 +78,14 @@ export const puedeVer = (s: Sesion, sec: Seccion) => ROLES[s.rol].ver.includes(s
 export const puedeRegistrar = (s: Sesion, sec: Seccion) => ROLES[s.rol].registrar.includes(sec)
 
 /** Tienda fija del usuario (contador de tienda), si la tiene. */
-export const tiendaFija = (s: Sesion) => (s.rol === 'contador_tienda' ? (s.tiendas?.[0] ?? 'km26') : undefined)
+export const tiendaFija = (s: Sesion) => (s.rol === 'contador_tienda' || s.rol === 'dependiente' ? (s.tiendas?.[0] ?? 'km26') : undefined)
 
 /** Para páginas: redirige al login si no hay sesión o el rol no puede ver la sección. */
 export async function requerirUsuario(sec?: Seccion): Promise<Sesion> {
   const s = await sesionActual()
   if (!s) redirect('/login')
+  // Quien no ve el dashboard (dependiente) entra directo a su primera sección.
+  if (sec === 'dashboard' && !puedeVer(s, sec)) redirect(`/${ROLES[s.rol].ver[0] ?? 'cuenta'}`)
   if (sec && !puedeVer(s, sec)) redirect('/?sinPermiso=1')
   return s
 }
