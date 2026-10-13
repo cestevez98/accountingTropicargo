@@ -68,3 +68,15 @@ describe('inventario de la Tienda Web', () => {
     expect(inv.some((f) => f.tienda === 'web')).toBe(false)
   })
 })
+
+import { ClienteAxis } from '../lib/axispos'
+
+describe('modo solo lectura', () => {
+  it('no deja escribir en AxisPOS sin AXISPOS_ESCRITURA=1', async () => {
+    delete process.env.AXISPOS_ESCRITURA
+    const c = new ClienteAxis('https://ejemplo.invalid', 'u', 'p')
+    await expect(c.guardarMonedas([{ Name: 'USD', ExchangeRate: 1 }])).rejects.toThrow(/solo lectura/)
+    await expect(c.importarOperaciones([])).rejects.toThrow(/solo lectura/)
+    await expect(c.guardarUbicaciones([])).rejects.toThrow(/solo lectura/)
+  })
+})

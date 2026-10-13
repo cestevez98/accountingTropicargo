@@ -1,4 +1,5 @@
 import { accionAxisEnviarTasa, accionTasa } from '../../acciones'
+import { escrituraAxis } from '@/lib/axispos'
 import { FormAccion } from '@/components/FormAccion'
 import { Aviso, Encabezado, Importe, Paginador, url } from '@/components/ui'
 import { puedeRegistrar, requerirUsuario } from '@/lib/auth'
@@ -79,7 +80,7 @@ export default async function Tasas({ searchParams }: { searchParams: SP }) {
               </label>
             </div>
           </FormAccion>
-          {ds.settings.axispos?.url && (
+          {escrituraAxis() && ds.settings.axispos?.url && (
             <div className="mt-4 rounded-lg border border-border p-3">
               <h3 className="text-sm font-semibold">Enviar al TPV</h3>
               <p className="mt-1 text-xs text-muted-foreground">

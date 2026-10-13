@@ -2,7 +2,7 @@ import { accionAxisArea, accionAxisConfig, accionAxisProbar, accionAxisProductos
 import { FormAccion } from '@/components/FormAccion'
 import { Aviso, Chip, Encabezado } from '@/components/ui'
 import { requerirUsuario } from '@/lib/auth'
-import { CAJA_TIPO, OPER_TYPE, OPER_TYPES_SYNC } from '@/lib/axispos'
+import { CAJA_TIPO, escrituraAxis, OPER_TYPE, OPER_TYPES_SYNC } from '@/lib/axispos'
 import { cargarDataset } from '@/lib/data'
 import { hoy } from '@/lib/fecha'
 
@@ -20,6 +20,11 @@ export default async function Integraciones() {
   return (
     <>
       <Encabezado titulo="Integraciones" descripcion="Conexión con AxisPOS / AxisCloud por el SyncApi (API de integración v2.1). Trae ventas, mermas, consumo interno, devoluciones, compras y los gastos e ingresos de caja de cada área." />
+      {!escrituraAxis() && (
+        <div className="tarjeta mb-4 border-l-4 border-l-primary p-3 text-sm">
+          <strong>Modo solo lectura.</strong> El sistema solo trae información de AxisPOS: no envía tasas, compras ni ningún cambio al TPV.
+        </div>
+      )}
       <div className="grid gap-4 lg:grid-cols-2">
         <div className="tarjeta p-4">
           <div className="flex items-center justify-between">

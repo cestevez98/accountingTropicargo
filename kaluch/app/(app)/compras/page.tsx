@@ -8,6 +8,7 @@ import { hoy } from '@/lib/fecha'
 import { prepararTasas, tasaVigente } from '@/lib/fx'
 import { params, tiendaActiva, type SP } from '@/lib/pagina'
 import { PAGO_LABEL } from '@/lib/types'
+import { escrituraAxis } from '@/lib/axispos'
 import { FormCompra } from './FormCompra'
 
 const POR_PAGINA = 100
@@ -55,7 +56,7 @@ export default async function Compras({ searchParams }: { searchParams: SP }) {
             hoy={hoy()}
             pagos={Object.entries(PAGO_LABEL)}
             proveedoresTPV={ds.settings.axispos?.proveedores ?? []}
-            tpv={Boolean(ds.settings.axispos?.url && ds.tiendas.find((x) => x.id === 'almacen')?.codigoTPV)}
+            tpv={Boolean(escrituraAxis() && ds.settings.axispos?.url && ds.tiendas.find((x) => x.id === 'almacen')?.codigoTPV)}
           />
           <datalist id="productos">
             {ds.productos.slice(0, 3000).map((p) => (
@@ -147,7 +148,7 @@ export default async function Compras({ searchParams }: { searchParams: SP }) {
                         <Chip tono="verde" title={`Documento ${c.axis.acct} · ${c.axis.enviada.slice(0, 16)}`}>
                           Subida #{c.axis.acct}
                         </Chip>
-                      ) : c.tienda === 'almacen' && c.origen === 'manual' && registrar ? (
+                      ) : escrituraAxis() && c.tienda === 'almacen' && c.origen === 'manual' && registrar ? (
                         <div>
                           {c.axis?.error && (
                             <Chip tono="rojo" title={c.axis.error}>

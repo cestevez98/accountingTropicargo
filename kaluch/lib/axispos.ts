@@ -118,6 +118,15 @@ function comprobarEstado(j: unknown, ruta: string) {
   }
 }
 
+/**
+ * Candado de escritura: el TPV trabaja en tiempo real, así que por defecto el sistema SOLO LEE de AxisPOS.
+ * Para permitir subir tasa o compras hay que poner AXISPOS_ESCRITURA=1 en las variables del servidor.
+ */
+export const escrituraAxis = () => process.env.AXISPOS_ESCRITURA === '1'
+const exigirEscritura = (que: string) => {
+  if (!escrituraAxis()) throw new ErrorAxis(`Integración en modo solo lectura: no se envía ${que} a AxisPOS.`)
+}
+
 // Token por instancia (dura 24 h; se renueva a las 12 h para no caducar a mitad de un lote).
 const tokens = new Map<string, { token: string; hasta: number }>()
 
@@ -236,6 +245,7 @@ export class ClienteAxis {
 
   /** Escribe monedas en la central (se crean o se actualizan por Name). */
   async guardarMonedas(data: Record<string, unknown>[]) {
+    exigirEscritura('la tasa')
     return this.pedir('ImportExportCurrencies', { method: 'POST', cuerpo: { data } })
   }
 
@@ -253,6 +263,7 @@ export class ClienteAxis {
 
   /** Crea o actualiza ubicaciones (áreas) en la central. */
   async guardarUbicaciones(data: Record<string, unknown>[]) {
+    exigirEscritura('ninguna área')
     return this.pedir('ImportExportLocations', { method: 'POST', cuerpo: { data } })
   }
 
@@ -261,6 +272,7 @@ export class ClienteAxis {
    * El cuerpo va en GZIP y la respuesta se comprueba (`status`), no solo el HTTP 200.
    */
   async importarOperaciones(operaciones: OperacionTPV[], syncId = `KA-${Date.now()}`) {
+    exigirEscritura('ninguna operación')
     return this.pedir('ImportOperations', { method: 'POST', cuerpo: { SyncId: syncId, Operations: operaciones, CashbookSyncs: [] }, gzip: true })
   }
 

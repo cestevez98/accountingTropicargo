@@ -5,7 +5,7 @@ import { cookies } from 'next/headers'
 import { redirect } from 'next/navigation'
 import { aplicarLote } from '@/lib/aplicar'
 import { autorizar, cerrarSesion, hashPassword, iniciarSesion, tiendaFija, verificarPassword, type Sesion } from '@/lib/auth'
-import { ClienteAxis, mapaAreas, mapearOperaciones, proponerAreas, type OperacionTPV } from '@/lib/axispos'
+import { ClienteAxis, escrituraAxis, mapaAreas, mapearOperaciones, proponerAreas, type OperacionTPV } from '@/lib/axispos'
 import { areaAlmacen, monedasConTasa, notaKA, operacionCompra, operacionTraslado, SERIE_INICIAL } from '@/lib/axispos-envio'
 import { DEFAULT_SETTINGS } from '@/lib/catalogo'
 import { cargarDataset, leerUsuarios, registrarAuditoria } from '@/lib/data'
@@ -231,7 +231,7 @@ export async function accionCompra(_prev: Resultado | null, form: FormData): Pro
     await mutar({ compras: [] as Compra[], salidas: [] as Salida[] }, ({ compras, salidas }) => ({ compras: [...compras, ...nuevas], ...(traslados.length ? { salidas: [...salidas, ...traslados] } : {}) }))
     await registrarAuditoria([{ usuario: s.email, accion: 'crear', coleccion: 'compras', ref: nuevas[0].id, detalle: `${nuevas.length} registro(s) · ${importe} ${mon}` }])
     let extra = ''
-    if (form.get('enviarAxis') === 'on') {
+    if (form.get('enviarAxis') === 'on' && escrituraAxis()) {
       const r = await enviarCompraAxis(nuevas[0].id)
       extra = r.ok ? ` ${r.mensaje}` : ` No se pudo subir a AxisPOS: ${r.error}`
     }
@@ -702,6 +702,7 @@ export async function accionVaciar(_prev: Resultado | null, form: FormData): Pro
 /** Manda al TPV la tasa de la tienda (Toque + margen) del USD, EUR y MLC del día indicado. */
 export async function accionAxisEnviarTasa(_prev: Resultado | null, form: FormData): Promise<Resultado> {
   try {
+    if (!escrituraAxis()) throw new Error('Integración en modo solo lectura: no se envía la tasa a AxisPOS.')
     const s = await autorizar('tasas')
     const ds = await cargarDataset()
     const f = str(form, 'fecha') || new Date().toISOString().slice(0, 10)
@@ -722,6 +723,7 @@ export async function accionAxisEnviarTasa(_prev: Resultado | null, form: FormDa
  * a la central qué notas faltan de verdad, así que repetir el envío no duplica.
  */
 async function enviarCompraAxis(id: string): Promise<Resultado> {
+  if (!escrituraAxis()) return { ok: false, error: 'Integración en modo solo lectura: no se envía nada a AxisPOS.' }
   const ds = await cargarDataset()
   const cfg = ds.settings.axispos
   const compra = ds.compras.find((c) => c.id === id)
