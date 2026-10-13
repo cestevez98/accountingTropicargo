@@ -73,6 +73,20 @@ export const FORMATOS: Formato[] = [
     descartarEstados: ['reverted', 'declined', 'failed', 'revertido', 'rechazado', 'fallido'],
   },
   {
+    id: 'amex-corporativa',
+    nombre: 'American Express — corporativa',
+    firma: ['posting date', 'reference id', 'amount'],
+    columnas: {
+      fecha: ['posting date'],
+      concepto: ['description'],
+      detalle: ['merchant category'],
+      importe: ['amount'],
+      referencia: ['reference id'],
+    },
+    fecha: 'MDY',
+    invertir: true,
+  },
+  {
     id: 'amex',
     nombre: 'American Express',
     firma: ['date', 'description', 'amount', '!running bal.', '!posted date'],
@@ -346,7 +360,7 @@ export function convertir(t: Tabla, m: Mapeo, opciones: { fecha: FormatoFecha; i
       fecha: fecha ?? '',
       concepto: concepto || detalle || '(sin concepto)',
       importe: Math.round(importe * 100) / 100,
-      referencia: m.referencia != null ? String(val(r, 'referencia') ?? '').trim() || undefined : undefined,
+      referencia: m.referencia != null ? String(val(r, 'referencia') ?? '').replace(/^ref(erence)?[:#]?\s*/i, '').replace(/^['"]+|['"]+$/g, '').trim() || undefined : undefined,
       moneda: mon === 'EUR' || mon === 'CUP' ? mon : 'USD',
       saldo: Number.isFinite(saldo) ? saldo : undefined,
       extra,
@@ -431,23 +445,33 @@ const TOKENS_LARGOS = /\d{6,}(?:-\d{4,})?/g
  * OTRO importe (p. ej. un error al teclear): misma fecha ±2 días y el mismo número de referencia dentro
  * del concepto (WIRE REF#…, número de cheque…) o el mismo concepto exacto. Devuelve línea → id existente.
  */
-export function marcarDiferencias(lineas: Linea[], existentes: Existente[], duplicadas: Set<number>, usadosIds: Set<string>): Map<number, Existente> {
-  const out = new Map<number, Existente>()
+export function marcarDiferencias(
+  lineas: Linea[],
+  existentes: Existente[],
+  duplicadas: Set<number>,
+  usadosIds: Set<string>,
+): Map<number, Existente & { porReferencia: boolean }> {
+  const out = new Map<number, Existente & { porReferencia: boolean }>()
   const dia = 86400000
   for (const l of lineas) {
     if (duplicadas.has(l.n) || l.error) continue
     const tokens = `${l.concepto} ${l.referencia ?? ''}`.match(TOKENS_LARGOS) ?? []
     const t = Date.parse(l.fecha)
-    const candidato = existentes.find((e) => {
-      if (usadosIds.has(e.id) || Math.abs(Date.parse(e.fecha) - t) > 2 * dia) return false
-      if (Math.sign(e.importe) !== Math.sign(l.importe)) return false
-      const texto = `${e.concepto} ${e.referencia ?? ''}`
-      if (tokens.some((tk) => texto.includes(tk))) return true
-      return normConcepto(e.concepto).length > 12 && normConcepto(e.concepto) === normConcepto(l.concepto)
-    })
+    const cerca = (e: Existente) => !usadosIds.has(e.id) && Math.abs(Date.parse(e.fecha) - t) <= 2 * dia && Math.sign(e.importe) === Math.sign(l.importe)
+    // Primero por número de referencia dentro del concepto (seguro); si no, por concepto idéntico (dudoso).
+    let candidato = existentes.find((e) => cerca(e) && tokens.some((tk) => `${e.concepto} ${e.referencia ?? ''}`.includes(tk)))
+    const porReferencia = Boolean(candidato)
+    // Por concepto solo si el importe se parece (±20 %): una diferencia enorme es otro movimiento, no un error de tecleo.
+    candidato ??= existentes.find(
+      (e) =>
+        cerca(e) &&
+        normConcepto(e.concepto).length > 12 &&
+        normConcepto(e.concepto) === normConcepto(l.concepto) &&
+        Math.abs(e.importe - l.importe) <= 0.2 * Math.abs(l.importe),
+    )
     if (candidato) {
       usadosIds.add(candidato.id)
-      out.set(l.n, candidato)
+      out.set(l.n, { ...candidato, porReferencia })
     }
   }
   return out

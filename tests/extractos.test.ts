@@ -65,7 +65,7 @@ describe('extracto OFX (Truist)', () => {
     const dup = marcarDuplicados(lineas, existentes, usados)
     const dif = marcarDiferencias(lineas, existentes, dup, usados)
     expect([...dup]).toEqual([1])
-    expect(dif.get(0)?.id).toBe('a')
+    expect(dif.get(0)).toMatchObject({ id: 'a', porReferencia: true })
     expect(lineas.filter((l) => !dup.has(l.n) && !dif.has(l.n)).map((l) => l.importe)).toEqual([-49])
   })
   it('dos movimientos iguales el mismo día cuentan como dos', () => {
@@ -97,5 +97,26 @@ describe('categoría sugerida', () => {
     const l = { concepto: 'GOOGLE *ADS8602090464', importe: -52.75, extra: {} }
     expect(sugerirCategoria(l, 'Truist', [{ id: '1', contiene: 'google', categoria: 'Comunicación y Marketing' }], { 'Truist|-|google ads': 'Otros gastos' })?.categoria).toBe('Comunicación y Marketing')
     expect(sugerirCategoria({ ...l, concepto: 'AMAZON MKTPL*5N3R67VT0' }, 'Truist', [], { '*|-|amazon mktpl': 'Compras Asistidas' })?.categoria).toBe('Compras Asistidas')
+  })
+})
+
+describe('extracto AMEX corporativo', () => {
+  const CSV = `Description,,,,Summary Amt.
+Total credits,,,,"-44.31"
+Total debits,,,,"6312.96"
+
+CardHolder Name,Account/Card Number - last 4 digits,Posting Date,Trans. Date,Reference ID,Description,Amount,MCC,Merchant Category,Transaction Type,Expense Category
+KIARA I SOLINO,6512,10/12/2026,10/10/2026,Ref: 82711096283000538673645,"idrama","3.99",5815,"DIGITAL GOODS",D,Amusement
+KIARA I SOLINO,6512,10/07/2026,10/06/2026,Ref: 55432866279209905617350,"AMAZON MKTPLACE PMTS","-44.31",5942,"BOOK STORES",C,Retail Stores`
+  it('salta el resumen, invierte el signo y limpia la referencia', () => {
+    const t = leerArchivo('amex.csv', buf(CSV))
+    const f = detectarFormato(t)
+    const ls = convertir(t, mapear(t, f), { fecha: f!.fecha, invertir: f!.invertir })
+    expect(f?.id).toBe('amex-corporativa')
+    expect(ls.map((l) => [l.fecha, l.importe, l.referencia])).toEqual([
+      ['2026-10-12', -3.99, '82711096283000538673645'],
+      ['2026-10-07', 44.31, '55432866279209905617350'],
+    ])
+    expect(String(ls[0].extra.MCC)).toBe('5815')
   })
 })

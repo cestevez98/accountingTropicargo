@@ -111,7 +111,8 @@ export function ImportadorExtractos({ cuentas, categorias }: { cuentas: string[]
 
   const categoriaDe = (l: Linea) => cats[l.n] ?? analisis?.sugerencias.get(l.n)?.categoria ?? 'Por clasificar'
   const seImporta = (l: Linea) => !excluir[l.n]
-  const seCorrige = (l: Linea) => corregir[l.n] !== false
+  // Solo se propone corregir automáticamente cuando coincide el número de referencia; por concepto, lo decide el usuario.
+  const seCorrige = (l: Linea) => corregir[l.n] ?? Boolean(analisis?.dif.get(l.n)?.porReferencia)
 
   // Conciliación: saldo del sistema a la fecha del saldo del banco, tras aplicar la importación.
   const conciliacion = useMemo(() => {
@@ -357,7 +358,12 @@ export function ImportadorExtractos({ cuentas, categorias }: { cuentas: string[]
                       <td className={`num ${l.importe < 0 ? 'text-red-600' : 'text-emerald-700'}`}>
                         {fmt(l.importe)} {l.moneda !== 'USD' && <span className="text-xs">{l.moneda}</span>}
                       </td>
-                      {vista === 'distintas' && <td className="num">{fmt(ex?.importe)}</td>}
+                      {vista === 'distintas' && (
+                        <td className="num">
+                          {fmt(ex?.importe)}
+                          <div className="text-[11px] text-slate-400">{ex?.porReferencia ? 'misma referencia' : 'solo mismo concepto: revisa'}</div>
+                        </td>
+                      )}
                       {vista === 'nuevas' && (
                         <td>
                           <select className="input !py-1 text-xs" value={categoriaDe(l)} onChange={(e) => setCats({ ...cats, [l.n]: e.target.value })}>
