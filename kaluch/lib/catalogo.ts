@@ -84,6 +84,7 @@ export const RUBRO = {
   costo: 'Costo de Ventas',
   consumo: 'Consumo interno',
   merma: 'Merma',
+  ajusteInv: 'Ajustes de inventario',
   impVentas: 'Ventas',
   tenencia: 'Resultado por tenencia de moneda',
   ajuste: 'Ajustes manuales',

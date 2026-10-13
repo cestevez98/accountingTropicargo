@@ -157,7 +157,7 @@ export function construirMayor(ds: Dataset, hasta = hoy()): Mayor {
     if (costo == null) {
       const unit = s.producto ? costos.get(s.producto) : undefined
       costo = unit != null && s.cantidad ? unit * s.cantidad : 0
-      if (!costo && s.tipo !== 'devolucion') sinCosto++
+      if (!costo && s.tipo !== 'devolucion' && s.tipo !== 'ajuste') sinCosto++
     }
     const signo = s.tipo === 'devolucion' ? -1 : 1
     let venta = 0
@@ -188,8 +188,12 @@ export function construirMayor(ds: Dataset, hasta = hoy()): Mayor {
       push(d.fecha, d.tienda, 'ventas_por_depositar', cuentaRes('ventas', RUBRO.venta), d.venta, 'sal', ref, concepto, 'Ventas TPV')
       push(d.fecha, d.tienda, 'ventas_por_depositar', cuentaRes('ingreso_tasa', RUBRO.tasa), d.tasa, 'sal', ref, concepto, 'Ventas TPV')
       push(d.fecha, d.tienda, cuentaRes('costo_ventas', RUBRO.costo), 'inventario', d.costo, 'sal', ref, concepto, 'Costo de ventas')
+    } else if (d.tipo === 'traslado') {
+      // Mercancía enviada a otra tienda: sale del inventario contra la cuenta con Casa Matriz
+      // (la tienda que la recibe la registra como compra «Mov. entre mercados»).
+      push(d.fecha, d.tienda, 'casa_matriz', 'inventario', d.costo, 'sal', ref, `Traslados a otras tiendas (${d.n} líneas)`, 'Traslados')
     } else {
-      const rubro = d.tipo === 'merma' ? RUBRO.merma : RUBRO.consumo
+      const rubro = d.tipo === 'merma' ? RUBRO.merma : d.tipo === 'ajuste' ? RUBRO.ajusteInv : RUBRO.consumo
       push(d.fecha, d.tienda, cuentaRes('gasto_admin', rubro), 'inventario', d.costo, 'sal', ref, `${rubro} del día (${d.n} líneas)`, rubro)
     }
   }

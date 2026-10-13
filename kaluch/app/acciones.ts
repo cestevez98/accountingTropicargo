@@ -5,7 +5,7 @@ import { cookies } from 'next/headers'
 import { redirect } from 'next/navigation'
 import { aplicarLote } from '@/lib/aplicar'
 import { autorizar, cerrarSesion, hashPassword, iniciarSesion, tiendaFija, verificarPassword, type Sesion } from '@/lib/auth'
-import { ClienteAxis, mapearOperaciones } from '@/lib/axispos'
+import { ClienteAxis, mapaAreas, mapearOperaciones, proponerAreas } from '@/lib/axispos'
 import { DEFAULT_SETTINGS } from '@/lib/catalogo'
 import { cargarDataset, leerUsuarios, registrarAuditoria } from '@/lib/data'
 import { COLECCIONES_OPERATIVAS, DEFECTOS } from '@/lib/defectos'
@@ -685,7 +685,9 @@ export async function accionAxisConfig(_prev: Resultado | null, form: FormData):
     const s = await autorizar('integraciones')
     let url = str(form, 'url').replace(/\/+$/, '').replace(/\/SyncApi$/i, '')
     if (url && !/^https:\/\//.test(url)) url = `https://${url.replace(/^http:\/\//, '')}`
-    const cambios = { url, usuario: str(form, 'usuario'), cobros: form.get('cobros') === 'on', cuentaBanco: str(form, 'cuentaBanco').toUpperCase() || 'FISCAL' }
+    const desde = str(form, 'desde')
+    if (desde && !esFecha(desde)) throw new Error('La fecha de inicio debe tener el formato AAAA-MM-DD.')
+    const cambios = { url, usuario: str(form, 'usuario'), cobros: form.get('cobros') === 'on', cuentaBanco: str(form, 'cuentaBanco').toUpperCase() || 'FISCAL', ...(desde ? { desde } : {}) }
     await mutar({ settings: DEFAULT_SETTINGS }, ({ settings }) => ({ settings: { ...DEFAULT_SETTINGS, ...settings, axispos: { ...settings.axispos, ...cambios } } }))
     await registrarAuditoria([{ usuario: s.email, accion: 'configurar', coleccion: 'axispos', detalle: JSON.stringify(cambios) }])
     refrescar()
@@ -708,11 +710,24 @@ export async function accionAxisProbar(_prev?: Resultado | null, _f?: FormData):
     const s = await autorizar('integraciones')
     const c = clienteAxis(await cargarDataset())
     await c.comprobar()
-    const ubic = (await c.ubicaciones()).filter((u) => !u.DeletedDb).map((u) => ({ code: String(u.Code), nombre: u.Name }))
-    await mutar({ settings: DEFAULT_SETTINGS }, ({ settings }) => ({ settings: { ...DEFAULT_SETTINGS, ...settings, axispos: { ...settings.axispos!, ubicaciones: ubic } } }))
-    await registrarAuditoria([{ usuario: s.email, accion: 'probar conexión', coleccion: 'axispos', detalle: `${ubic.length} áreas` }])
+    const ubic = (await c.ubicaciones()).filter((u) => !u.DeletedDb).map((u) => ({ code: String(u.Code), nombre: u.Name, grupo: u.Group }))
+    // Las tiendas que todavía no tienen área reciben las que les corresponden por grupo o nombre.
+    let asignadas = 0
+    await mutar({ settings: DEFAULT_SETTINGS, tiendas: DEFECTOS.tiendas }, ({ settings, tiendas }) => {
+      const prop = proponerAreas(ubic, tiendas)
+      return {
+        settings: { ...DEFAULT_SETTINGS, ...settings, axispos: { ...settings.axispos!, ubicaciones: ubic } },
+        tiendas: tiendas.map((t) => {
+          const codigos = prop.get(t.id)
+          if (t.codigoTPV || !codigos) return t
+          asignadas++
+          return { ...t, codigoTPV: codigos.join(',') }
+        }),
+      }
+    })
+    await registrarAuditoria([{ usuario: s.email, accion: 'probar conexión', coleccion: 'axispos', detalle: `${ubic.length} áreas, ${asignadas} tiendas asignadas` }])
     refrescar()
-    return { ok: true, mensaje: `Conexión correcta. El tenant tiene ${ubic.length} áreas; asígnalas abajo a cada tienda.` }
+    return { ok: true, mensaje: `Conexión correcta. El tenant tiene ${ubic.length} áreas${asignadas ? `; se asignaron automáticamente a ${asignadas} tiendas (revísalo abajo)` : ''}.` }
   } catch (e) {
     return fallo(e)
   }
@@ -723,9 +738,12 @@ export async function accionAxisArea(_prev: Resultado | null, form: FormData): P
   try {
     const s = await autorizar('integraciones')
     const tienda = str(form, 'tienda')
-    const codigo = str(form, 'codigo')
+    const codigos = [...new Set(form.getAll('codigo').flatMap((v) => String(v).split(',')).map((v) => v.trim()).filter(Boolean))]
+    const codigo = codigos.join(',')
     await mutar({ tiendas: DEFECTOS.tiendas }, ({ tiendas }) => {
-      if (codigo && tiendas.some((t) => t.id !== tienda && t.codigoTPV === codigo)) throw new Error('Esa área ya está asignada a otra tienda.')
+      const usados = mapaAreas(tiendas.filter((t) => t.id !== tienda))
+      const repetido = codigos.find((c) => usados.has(c))
+      if (repetido) throw new Error(`El área ${repetido} ya está asignada a otra tienda.`)
       return { tiendas: tiendas.map((t) => (t.id === tienda ? { ...t, codigoTPV: codigo || undefined } : t)) }
     })
     await registrarAuditoria([{ usuario: s.email, accion: 'asignar área', coleccion: 'tiendas', ref: tienda, detalle: codigo }])
@@ -782,13 +800,25 @@ export async function accionAxisSync(_prev: Resultado | null, form: FormData): P
     const c = clienteAxis(ds)
     const ops = []
     const caja = []
-    const marcas: Record<string, { op: number; pago: number; caja: number }> = { ...cfg.marcas }
-    for (const t of tiendas) {
-      const r = await c.exportarOperaciones(String(t.codigoTPV), modo === 'rango' ? { desde, hasta } : { marcas: cfg.marcas?.[t.id] ?? { op: 0, pago: 0, caja: 0 } })
-      ops.push(...r.operaciones)
-      caja.push(...r.caja)
-      if (modo === 'novedades') marcas[t.id] = r.marcas
-    }
+    const inicio = cfg.desde ?? ds.settings.fechaInicio
+    const hoyISO = new Date().toISOString().slice(0, 10)
+    const ultimo: Record<string, string> = { ...cfg.ultimoDia }
+    for (const t of tiendas)
+      for (const area of (t.codigoTPV ?? '').split(',').map((x) => x.trim()).filter(Boolean)) {
+        // Novedades: desde el día anterior a la última pasada (recoge lo que llegó tarde) hasta hoy.
+        // Lo repetido se descarta por tienda + ticket + fecha. Las marcas de agua de la central no se
+        // usan porque un área sin movimiento devuelve -1, y pedir desde 0 traería todo el historial.
+        let d = desde
+        if (modo === 'novedades') {
+          const u = cfg.ultimoDia?.[area]
+          d = u ? new Date(Date.parse(`${u}T00:00:00Z`) - 86400000).toISOString().slice(0, 10) : inicio
+          if (d < inicio) d = inicio
+        }
+        const r = await c.exportarOperaciones(area, { desde: d, hasta: modo === 'rango' ? hasta : hoyISO })
+        ops.push(...r.operaciones)
+        caja.push(...r.caja)
+        if (modo === 'novedades') ultimo[area] = hoyISO
+      }
     const tabla = prepararTasas(ds.tasas, ds.settings.margenTasa)
     const m = mapearOperaciones(ops, caja, ds.tiendas, (f) => tasaVigente(tabla, f)?.cupUsd ?? 0, { cobros: Boolean(cfg.cobros), cuentaBanco: cfg.cuentaBanco })
     const loteId = uid()
@@ -810,14 +840,22 @@ export async function accionAxisSync(_prev: Resultado | null, form: FormData): P
       // Novedades: se descartan las operaciones (tienda + ticket + fecha) que ya estén guardadas.
       const ya = new Set(a.salidas.filter((x) => x.origen === 'tpv').map((x) => `${x.tienda}|${x.operacion}|${x.fecha}`))
       const yaC = new Set(a.compras.filter((x) => x.origen === 'tpv').map((x) => `${x.tienda}|${x.factura}|${x.fecha}`))
+      const kM = (x: Movimiento) => `${x.libro}|${x.tienda}|${x.fecha}|${x.concepto}|${x.tipo}|${x.moneda}|${x.monto}`
+      const yaM = new Map<string, number>()
+      for (const x of a.movimientos) if (x.origen === 'tpv') yaM.set(kM(x), (yaM.get(kM(x)) ?? 0) + 1)
       const sal = m.salidas.filter((x) => !ya.has(`${x.tienda}|${x.operacion}|${x.fecha}`))
       const com = m.compras.filter((x) => !yaC.has(`${x.tienda}|${x.factura}|${x.fecha}`))
-      nuevas = { salidas: sal.length, compras: com.length, movimientos: m.movimientos.length }
+      const mov = m.movimientos.filter((x) => {
+        const n = yaM.get(kM(x)) ?? 0
+        if (n > 0) yaM.set(kM(x), n - 1)
+        return n === 0
+      })
+      nuevas = { salidas: sal.length, compras: com.length, movimientos: mov.length }
       return {
         salidas: [...a.salidas, ...marca(sal)],
         compras: [...a.compras, ...marca(com)],
-        movimientos: [...a.movimientos, ...marca(m.movimientos)],
-        settings: { ...DEFAULT_SETTINGS, ...a.settings, axispos: { ...a.settings.axispos!, ultimoSync: new Date().toISOString(), marcas } },
+        movimientos: [...a.movimientos, ...marca(mov)],
+        settings: { ...DEFAULT_SETTINGS, ...a.settings, axispos: { ...a.settings.axispos!, ultimoSync: new Date().toISOString(), ultimoDia: ultimo } },
       }
     })
     const ign = [...m.ignorados.entries()].map(([k, v]) => `${v} ${k}`).join(', ')

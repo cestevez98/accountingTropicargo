@@ -101,6 +101,7 @@ const ORDEN_RUBROS: Record<LineaER, string[]> = {
     'Comunicación (Publicidad)',
     'Otros gastos',
     RUBRO.merma,
+    RUBRO.ajusteInv,
     'Gastos bancarios',
   ],
   ingreso_financiero: ['Ingresos Financieros', RUBRO.tenencia],

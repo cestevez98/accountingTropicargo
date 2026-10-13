@@ -12,7 +12,7 @@ export interface Tienda {
   direccion?: string
   /** Nombres con los que aparece en los Excel o en el TPV (p. ej. «Ave26 y 41»). */
   alias?: string[]
-  /** Código del área/entidad en AxisPOS (ObjectCode). */
+  /** Códigos de las áreas de AxisPOS (ObjectCode) de esta tienda, separados por coma (almacén, piso de venta…). */
   codigoTPV?: string
   activa: boolean
 }
@@ -99,7 +99,8 @@ export interface Movimiento {
 export type Origen = 'manual' | 'importado' | 'tpv' | 'resumen'
 
 /** Salidas de inventario: ventas, mermas, consumo interno y devoluciones (equivale a la tabla «Salidas»). */
-export type TipoSalida = 'venta' | 'merma' | 'consumo' | 'devolucion'
+/** `ajuste`: diferencia de conteo (costo positivo = faltante). `traslado`: mercancía enviada a otra tienda. */
+export type TipoSalida = 'venta' | 'merma' | 'consumo' | 'devolucion' | 'ajuste' | 'traslado'
 
 export interface Salida {
   id: string
@@ -227,10 +228,12 @@ export interface Settings {
     cobros?: boolean
     /** Cuenta bancaria a la que van los cobros por transferencia o tarjeta. */
     cuentaBanco?: string
-    /** Marcas de agua de ExportOperations por tienda. */
-    marcas?: Record<string, { op: number; pago: number; caja: number }>
+    /** Último día traído del TPV, por área. */
+    ultimoDia?: Record<string, string>
     /** Áreas que devolvió la central la última vez (para asignarlas a las tiendas). */
-    ubicaciones?: { code: string; nombre: string }[]
+    ubicaciones?: { code: string; nombre: string; grupo?: string }[]
+    /** Primera fecha que se trae del TPV (lo anterior ya vino del Excel). */
+    desde?: string
   }
   mesesCerrados: string[]
 }

@@ -14,6 +14,9 @@ export default async function Integraciones() {
   const conectada = Boolean(cfg?.url && cfg.usuario && process.env.AXISPOS_PASSWORD)
   const lista = conectada && conCodigo.length > 0
   const areas = cfg?.ubicaciones ?? []
+  // Fecha de corte sugerida: el día siguiente a la última venta que no vino del TPV (la del Excel).
+  const ultimaExcel = ds.salidas.filter((x) => x.origen !== 'tpv').reduce((m, x) => (x.fecha > m ? x.fecha : m), '')
+  const corte = ultimaExcel ? new Date(Date.parse(`${ultimaExcel}T00:00:00Z`) + 86400000).toISOString().slice(0, 10) : ds.settings.fechaInicio
   return (
     <>
       <Encabezado titulo="Integraciones" descripcion="Conexión con AxisPOS / AxisCloud por el SyncApi (API de integración v2.1). Trae ventas, mermas, consumo interno, devoluciones, compras y los gastos e ingresos de caja de cada área." />
@@ -38,14 +41,18 @@ export default async function Integraciones() {
                 {process.env.AXISPOS_PASSWORD ? '✓ definida en la variable AXISPOS_PASSWORD' : 'Defínela en Vercel como variable de entorno AXISPOS_PASSWORD (no se guarda en la base de datos).'}
               </div>
               <label className="flex items-center gap-2 text-sm sm:col-span-2">
-                <input type="checkbox" name="cobros" defaultChecked={cfg?.cobros} /> Registrar los cobros de las ventas del TPV en caja (efectivo) y banco (transferencia o tarjeta)
+                <input type="checkbox" name="cobros" defaultChecked={cfg?.cobros} /> Registrar en caja (efectivo) y banco (tarjeta/transferencia) los cobros de las ventas y los pagos de las compras del TPV
               </label>
               <label>
                 <span className="etiqueta">Cuenta bancaria de los cobros</span>
                 <input name="cuentaBanco" defaultValue={cfg?.cuentaBanco ?? 'FISCAL'} className="input" />
               </label>
+              <label>
+                <span className="etiqueta">Traer del TPV a partir del</span>
+                <input name="desde" type="date" defaultValue={cfg?.desde ?? corte} className="input" />
+              </label>
             </div>
-            <p className="mt-2 text-xs text-muted-foreground">Si marcas los cobros, deja de anotar a mano en caja las entregas de «VENTAS» de los días que vengan del TPV, o se contarán dos veces.</p>
+            <p className="mt-2 text-xs text-muted-foreground">Lo anterior a esa fecha ya entró con el Excel de la tienda; empezar antes duplicaría ventas y compras. Si marcas los cobros, deja de anotar a mano en caja las entregas de «VENTAS» de los días que vengan del TPV, o se contarán dos veces.</p>
           </FormAccion>
           <div className="mt-3 flex flex-wrap gap-2">
             <FormAccion accion={accionAxisProbar} boton="Probar conexión y leer áreas" claseBoton="btn" limpiar={false}>
@@ -59,30 +66,31 @@ export default async function Integraciones() {
         </div>
         <div className="tarjeta p-4">
           <h2 className="text-sm font-semibold">2 · Área del TPV de cada tienda</h2>
-          <p className="mt-1 text-xs text-muted-foreground">Cada tienda se identifica en AxisPOS por el código de su ubicación (ObjectCode). {areas.length ? `El tenant tiene ${areas.length} áreas.` : 'Pulsa «Probar conexión» para leer las áreas del tenant.'}</p>
-          <ul className="mt-3 space-y-2">
+          <p className="mt-1 text-xs text-muted-foreground">Cada tienda puede tener varias áreas en AxisPOS (almacén, piso de venta, caja interna). Al probar la conexión se proponen solas por el grupo del tenant. {areas.length ? `El tenant tiene ${areas.length} áreas.` : 'Pulsa «Probar conexión» para leer las áreas del tenant.'}</p>
+          <ul className="mt-3 space-y-3">
             {ds.tiendas
               .filter((t) => t.activa)
-              .map((t) => (
-                <li key={t.id} className="flex items-center gap-2 text-sm">
-                  <span className="w-32 shrink-0">{t.nombre}</span>
-                  <FormAccion accion={accionAxisArea} boton="Guardar" claseBoton="btn px-2 py-1 text-xs" limpiar={false} className="flex flex-1 items-center gap-2">
-                    <input type="hidden" name="tienda" value={t.id} />
-                    {areas.length ? (
-                      <select name="codigo" defaultValue={t.codigoTPV ?? ''} className="input">
-                        <option value="">— sin área —</option>
-                        {areas.map((a) => (
-                          <option key={a.code} value={a.code}>
+              .map((t) => {
+                const mias = new Set((t.codigoTPV ?? '').split(',').filter(Boolean))
+                return (
+                  <li key={t.id} className="text-sm">
+                    <FormAccion accion={accionAxisArea} boton="Guardar" claseBoton="btn px-2 py-1 text-xs" limpiar={false} className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                      <input type="hidden" name="tienda" value={t.id} />
+                      <span className="w-28 shrink-0 font-medium">{t.nombre}</span>
+                      {areas.length ? (
+                        areas.map((a) => (
+                          <label key={a.code} className={`flex items-center gap-1 text-xs ${mias.has(a.code) ? '' : 'text-muted-foreground'}`}>
+                            <input type="checkbox" name="codigo" value={a.code} defaultChecked={mias.has(a.code)} />
                             {a.code} · {a.nombre}
-                          </option>
-                        ))}
-                      </select>
-                    ) : (
-                      <input name="codigo" defaultValue={t.codigoTPV} placeholder="código del área" className="input" />
-                    )}
-                  </FormAccion>
-                </li>
-              ))}
+                          </label>
+                        ))
+                      ) : (
+                        <input name="codigo" defaultValue={t.codigoTPV} placeholder="códigos de área, p. ej. 2,12" className="input w-48" />
+                      )}
+                    </FormAccion>
+                  </li>
+                )
+              })}
           </ul>
         </div>
       </div>
@@ -92,15 +100,15 @@ export default async function Integraciones() {
         <div className="mt-3 grid gap-4 lg:grid-cols-2">
           <div>
             <h3 className="text-sm font-medium">Novedades</h3>
-            <p className="mt-1 text-xs text-muted-foreground">Trae solo lo nuevo desde la última vez, con las marcas de agua del TPV (operaciones, cobros y caja). Es lo que conviene hacer cada día.</p>
+            <p className="mt-1 text-xs text-muted-foreground">Trae lo nuevo de cada área desde el día anterior a la última pasada hasta hoy, sin duplicar tickets ya guardados. Es lo que conviene hacer cada día.</p>
             <FormAccion accion={accionAxisSync} boton="Traer novedades" className="mt-2" limpiar={false}>
               <input type="hidden" name="modo" value="novedades" />
               <ul className="space-y-0.5 text-xs text-muted-foreground">
                 {conCodigo.map((t) => {
-                  const m = cfg?.marcas?.[t.id]
+                  const dias = (t.codigoTPV ?? '').split(',').filter(Boolean).map((a) => `${a}: ${cfg?.ultimoDia?.[a] ?? `desde ${cfg?.desde ?? corte}`}`)
                   return (
                     <li key={t.id}>
-                      {t.nombre}: {m ? `op. ${m.op} · cobros ${m.pago} · caja ${m.caja}` : 'desde el principio'}
+                      {t.nombre} — {dias.join(' · ')}
                     </li>
                   )
                 })}
@@ -109,7 +117,7 @@ export default async function Integraciones() {
           </div>
           <div>
             <h3 className="text-sm font-medium">Rango de fechas</h3>
-            <p className="mt-1 text-xs text-muted-foreground">Vuelve a traer un periodo completo y sustituye lo que se trajo antes del TPV en esas fechas (no toca las marcas de agua).</p>
+            <p className="mt-1 text-xs text-muted-foreground">Vuelve a traer un periodo completo y sustituye lo que se trajo antes del TPV en esas fechas.</p>
             <FormAccion accion={accionAxisSync} boton="Traer el rango" className="mt-2" limpiar={false}>
               <input type="hidden" name="modo" value="rango" />
               <div className="flex flex-wrap gap-3">
@@ -127,7 +135,7 @@ export default async function Integraciones() {
         </div>
         <div className="mt-4 grid gap-4 text-xs text-muted-foreground lg:grid-cols-2">
           <p>
-            Se contabilizan: {OPER_TYPES_SYNC.map((k) => `${k} ${OPER_TYPE[k]}`).join(', ')}. Los importes del TPV van en CUP (moneda base del tenant) y el costo (PriceIn) se pasa a USD con la tasa Toque del día. Los traslados entre áreas y la producción se informan pero todavía no se contabilizan.
+            Se contabilizan: {OPER_TYPES_SYNC.map((k) => `${k} ${OPER_TYPE[k]}`).join(', ')}. Los importes del TPV van en CUP (moneda base del tenant) y el costo (PriceIn) se pasa a USD con la tasa Toque del día. Los ajustes de conteo van a «Ajustes de inventario»; los traslados de almacén a piso de la misma tienda no generan asiento y los traslados a otra tienda pasan el inventario de una a otra contra Casa Matriz. Producción y consignación se informan pero todavía no se contabilizan.
           </p>
           <p>
             Gastos e ingresos de caja del TPV (CashbookSyncs): {Object.values(CAJA_TIPO)

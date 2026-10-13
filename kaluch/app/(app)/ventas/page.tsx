@@ -8,7 +8,7 @@ import { hoy } from '@/lib/fecha'
 import { params, tiendaActiva, type SP } from '@/lib/pagina'
 
 const POR_PAGINA = 100
-const TIPO = { venta: 'Venta', merma: 'Merma', consumo: 'Consumo interno', devolucion: 'Devolución' } as const
+const TIPO = { venta: 'Venta', merma: 'Merma', consumo: 'Consumo interno', devolucion: 'Devolución', ajuste: 'Ajuste de inventario', traslado: 'Traslado a otra tienda' } as const
 const ORIGEN = { importado: ['Importado', 'azul'], manual: ['Manual', 'ambar'], tpv: ['TPV', 'verde'], resumen: ['Resumen', 'gris'] } as const
 
 export default async function Ventas({ searchParams }: { searchParams: SP }) {

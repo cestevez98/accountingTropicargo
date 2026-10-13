@@ -58,7 +58,7 @@ describe('cliente SyncApi', () => {
     const r = await c.exportarOperaciones('KM26', { marcas: { op: 100, pago: 50, caja: 0 } })
     expect(r.marcas).toEqual({ op: 120, pago: 80, caja: 9 })
     const exp = pedidos.find((p) => p.ruta === 'ExportOperations')!.cuerpo as Record<string, unknown>
-    expect(exp).toMatchObject({ objectCode: 'KM26', opertypes: '1,2,3,11,34,39', idOperationFrom: 100, idPaymentFrom: 50, idCashbookFrom: 0 })
+    expect(exp).toMatchObject({ objectCode: 'KM26', opertypes: '1,2,3,4,8,11,34,39', idOperationFrom: 100, idPaymentFrom: 50, idCashbookFrom: 0 })
     expect(pedidos.filter((p) => p.ruta === 'Auth' && (p.cuerpo as { Password: string }).Password === 'ok')).toHaveLength(1)
   })
   it('un 200 con Status ERROR es un error', async () => {
@@ -82,6 +82,47 @@ describe('mapeo de operaciones', () => {
         expect.objectContaining({ libro: 'caja', categoria: 'SALARIO DEPENDIENTE', tipo: 'Salida', monto: 5000 }),
       ]),
     )
-    expect([...m.ignorados.keys()]).toEqual(['Traslado (salida)'])
+    expect(m.ignorados.size).toBe(0)
+  })
+})
+
+describe('áreas del tenant', () => {
+  it('propone las áreas de cada tienda por grupo y por nombre', async () => {
+    const { proponerAreas } = await import('../lib/axispos')
+    const ubic = [
+      ['2', 'ALMACEN 26', 'KM-26'],
+      ['10', 'Caja interna KM-26', 'Cuentas'],
+      ['11', 'Transferencia', 'Cuentas'],
+      ['12', 'PISO DE VENTA 26', 'KM-26'],
+      ['13', 'ALMACEN SAN LAZARO', 'KM-SL'],
+      ['14', 'PISO DE VENTA SAN LAZARO', 'KM-SL'],
+      ['15', 'ALMACEN 12', 'KM-12'],
+      ['17', 'ALMACEN AYESTARAN', 'KM-AY'],
+      ['19', 'ALMACEN CERRO', 'KM-CE'],
+      ['22', 'Caja interna KM-SL', 'Cuentas'],
+    ].map(([code, nombre, grupo]) => ({ code, nombre, grupo }))
+    const p = proponerAreas(ubic, DEFAULT_TIENDAS)
+    expect(Object.fromEntries(p)).toEqual({ km26: ['2', '10', '12'], slazaro: ['13', '14', '22'], km12: ['15'], ayestaran: ['17'], cerro: ['19'] })
+  })
+
+  it('los traslados almacén → piso de la misma tienda no generan asiento; a otra tienda sí', () => {
+    const tiendas = DEFAULT_TIENDAS.map((t) => (t.id === 'km26' ? { ...t, codigoTPV: '2,12' } : t.id === 'slazaro' ? { ...t, codigoTPV: '13' } : t))
+    const it = [{ ItemName: 'KERMATO', Qtty: 8, PriceIn: 700, Category: 'BEBIDAS' }, { ItemName: 'PAX A', Qtty: 1, Category: 'ESTADISTICA' }]
+    const m = mapearOperaciones(
+      [
+        { Acct: 1, Date: '2026-10-01', OperType: 8, ObjectCode: '2', TransferObjectCode: '12', Items: it },
+        { Acct: 2, Date: '2026-10-01', OperType: 8, ObjectCode: '12', TransferObjectCode: '13', Items: it },
+        { Acct: 3, Date: '2026-10-01', OperType: 4, ObjectCode: '12', Items: [{ ItemName: 'X', Qtty: -2, PriceIn: 350 }] },
+      ],
+      [],
+      tiendas,
+      () => 700,
+    )
+    expect(m.salidas).toEqual([
+      expect.objectContaining({ tipo: 'traslado', tienda: 'km26', cantidad: 8, costoUSD: 8 }),
+      expect.objectContaining({ tipo: 'ajuste', tienda: 'km26', cantidad: -2, costoUSD: 1 }),
+    ])
+    expect(m.compras).toEqual([expect.objectContaining({ tienda: 'slazaro', pago: 'mercados', importeUSD: 8, cantidad: 8 })])
+    expect(m.ignorados.size).toBe(1)
   })
 })

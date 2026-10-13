@@ -54,6 +54,7 @@ export function inventarioDerivado(ds: Pick<Dataset, 'compras' | 'salidas' | 'pr
     const f = fila(s.producto, s.tienda)
     if (s.tipo === 'venta') f.ventas += s.cantidad
     else if (s.tipo === 'devolucion') f.ventas -= s.cantidad
+    else if (s.tipo === 'ajuste') f.ajustes += s.cantidad
     else f.ajustes -= s.cantidad
   }
   const prods = new Map(ds.productos.map((p) => [p.nombre, p]))

@@ -41,7 +41,7 @@ export const OPER_TYPE: Record<number, string> = {
 }
 
 /** Tipos que el sistema contabiliza hoy. */
-export const OPER_TYPES_SYNC = [1, 2, 3, 11, 34, 39]
+export const OPER_TYPES_SYNC = [1, 2, 3, 4, 8, 11, 34, 39]
 
 /** Tipos de caja de CashbookSyncs.OperType (anexo de la API). */
 export const CAJA_TIPO: Record<number, { label: string; entrada: boolean; categoria: string }> = {
@@ -234,6 +234,38 @@ export class ClienteAxis {
   }
 }
 
+/** ObjectCode → tienda. Una tienda puede tener varias áreas («2,12,10»). */
+export function mapaAreas(tiendas: Tienda[]) {
+  const m = new Map<string, string>()
+  for (const t of tiendas)
+    for (const c of (t.codigoTPV ?? '').split(','))
+      if (c.trim()) m.set(c.trim(), t.id)
+  return m
+}
+
+/** Propone el área de cada tienda por el grupo del tenant (KM-26, KM-SL…) o por el nombre («Caja interna KM-26»). */
+export function proponerAreas(ubic: { code: string; nombre: string; grupo?: string }[], tiendas: Tienda[]) {
+  const norm = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, '')
+  const claves = (t: Tienda) => {
+    const k = new Set([norm(t.nombre), norm(t.id)])
+    const sigla = t.nombre
+      .split(/\s+/)
+      .map((p) => p[0])
+      .join('')
+    k.add(norm(`KM${t.nombre.replace(/^KM\s*/i, '')}`))
+    if (t.tipo === 'local' && !/^KM/i.test(t.nombre)) k.add(norm(`KM${t.nombre.slice(0, 2)}`)).add(norm(`KM${sigla}`))
+    return k
+  }
+  const out = new Map<string, string[]>()
+  for (const u of ubic) {
+    const texto = norm(`${u.grupo ?? ''}`) || norm(u.nombre)
+    const enNombre = norm(u.nombre)
+    const t = tiendas.find((x) => [...claves(x)].some((k) => k.length >= 4 && (texto === k || enNombre.endsWith(k))))
+    if (t) out.set(t.id, [...(out.get(t.id) ?? []), u.code])
+  }
+  return out
+}
+
 const numero = (v: unknown) => (typeof v === 'number' ? v : typeof v === 'string' && v.trim() ? Number(v) : NaN)
 const campo = (o: Record<string, unknown>, ...nombres: string[]) => {
   for (const n of nombres) {
@@ -257,7 +289,8 @@ function importeCobro(p: PagoTPV): { moneda: Moneda; monto: number } {
  * Convierte lo exportado por el TPV en datos contables:
  * - Ventas (2), devoluciones (34), mermas (3), consumo interno (11) → salidas de inventario.
  * - Compras (1) y devoluciones de compra (39) → compras.
- * - Con `cobros`, cada cobro de venta entra en caja (efectivo) o banco (transferencia/tarjeta) como VENTAS.
+ * - Con `cobros`, cada cobro de venta entra en caja (efectivo) o banco (transferencia/tarjeta) como VENTAS,
+ *   y cada pago de compra sale como PAGO AL CONTADO.
  * - Los CashbookSyncs → movimientos de caja con la categoría de su tipo.
  * Los importes del TPV van en CUP; el costo (PriceIn) se pasa a USD con la tasa Toque del día.
  */
@@ -271,48 +304,96 @@ export function mapearOperaciones(
   const salidas: Salida[] = []
   const compras: Compra[] = []
   const movimientos: Movimiento[] = []
-  const porCodigo = new Map(tiendas.filter((t) => t.codigoTPV).map((t) => [String(t.codigoTPV), t.id]))
+  const porCodigo = mapaAreas(tiendas)
   const ignorados = new Map<string, number>()
   let sinTienda = 0
   for (const o of ops) {
-    const tienda = porCodigo.get(String(o.ObjectCode ?? ''))
+    const area = String(o.ObjectCode ?? '')
+    const tienda = porCodigo.get(area)
     if (!tienda) {
       sinTienda++
       continue
     }
     const fecha = String(o.Date).slice(0, 10)
     const tasa = tasaDia(fecha)
-    const op = String(o.Acct ?? '')
-    if (![1, 2, 3, 11, 34, 39].includes(o.OperType)) {
-      const k = OPER_TYPE[o.OperType] ?? `tipo ${o.OperType}`
+    // El número de ticket (Acct) es por área: las ventas salen del piso, el resto lleva el área delante.
+    const op = o.OperType === 2 || o.OperType === 34 ? String(o.Acct ?? '') : `${area}-${o.Acct ?? ''}`
+    let tipoTraslado: 'interno' | 'externo' | undefined
+    if (o.OperType === 8) tipoTraslado = porCodigo.get(String(o.TransferObjectCode ?? '')) === tienda ? 'interno' : 'externo'
+    if (![1, 2, 3, 4, 8, 11, 34, 39].includes(o.OperType) || tipoTraslado === 'interno') {
+      const k = tipoTraslado === 'interno' ? 'Traslado almacén ↔ piso (misma tienda, sin asiento)' : (OPER_TYPE[o.OperType] ?? `tipo ${o.OperType}`)
       ignorados.set(k, (ignorados.get(k) ?? 0) + 1)
       continue
     }
+    const destino = tipoTraslado === 'externo' ? porCodigo.get(String(o.TransferObjectCode ?? '')) : undefined
     for (const it of o.Items ?? []) {
+      // Las líneas de «ESTADISTICA» (PAX) solo cuentan clientes: no son mercancía.
+      if ((it.Category ?? '').toUpperCase() === 'ESTADISTICA') continue
       const q = Number(it.Qtty) || 0
-      const costoUSD = tasa > 0 ? ((Number(it.PriceIn) || 0) * q) / tasa : undefined
+      if (!q) continue
+      const costoCUP = (Number(it.PriceIn) || 0) * q
+      const costoUSD = tasa > 0 ? costoCUP / tasa : undefined
       const importe = Number(it.AmountTotal) || q * (Number(it.Price) || 0) * (1 - (Number(it.Discount) || 0) / 100)
       const base = { id: '', fecha, tienda, operacion: op, producto: it.ItemName || it.ItemCode, cantidad: q, origen: 'tpv' as const }
-      if (o.OperType === 2) salidas.push({ ...base, tipo: 'venta', importe, moneda: 'CUP', costoUSD, pago: o.Payments?.[0]?.PaymentTypeName })
-      else if (o.OperType === 34) salidas.push({ ...base, tipo: 'devolucion', importe, moneda: 'CUP', costoUSD })
-      else if (o.OperType === 3) salidas.push({ ...base, tipo: 'merma', costoUSD })
-      else if (o.OperType === 11) salidas.push({ ...base, tipo: 'consumo', costoUSD })
-      else {
-        const signo = o.OperType === 39 ? -1 : 1
-        const total = signo * (Number(it.PriceIn) || 0) * q
-        compras.push({
+      switch (o.OperType) {
+        case 2:
+          salidas.push({ ...base, tipo: 'venta', importe, moneda: 'CUP', costoUSD, pago: o.Payments?.[0]?.PaymentTypeName })
+          break
+        case 34:
+          salidas.push({ ...base, tipo: 'devolucion', importe, moneda: 'CUP', costoUSD })
+          break
+        case 3:
+          salidas.push({ ...base, tipo: 'merma', costoUSD })
+          break
+        case 11:
+          salidas.push({ ...base, tipo: 'consumo', costoUSD })
+          break
+        case 4:
+          // Conteo: cantidad positiva = sobrante (ganancia), negativa = faltante (pérdida).
+          salidas.push({ ...base, tipo: 'ajuste', costoUSD: costoUSD != null ? -costoUSD : undefined })
+          break
+        case 8:
+          salidas.push({ ...base, tipo: 'traslado', costoUSD, nota: `a ${destino ?? o.TransferObjectCode}` })
+          if (destino)
+            compras.push({ id: '', fecha, tienda: destino, producto: base.producto, cantidad: q, factura: `Traslado ${op}`, proveedor: tiendas.find((t) => t.id === tienda)?.nombre, moneda: 'CUP', importe: costoCUP, ...(tasa > 0 ? { importeUSD: costoCUP / tasa, tasa } : {}), pago: 'mercados', fiscal: false, origen: 'tpv' })
+          break
+        default: {
+          const signo = o.OperType === 39 ? -1 : 1
+          compras.push({
+            id: '',
+            fecha,
+            tienda,
+            producto: base.producto,
+            cantidad: signo * q,
+            factura: o.InvoiceNumber || `TPV ${op}`,
+            proveedor: o.PartnerCode != null ? String(o.PartnerCode) : undefined,
+            moneda: 'CUP',
+            importe: signo * costoCUP,
+            ...(tasa > 0 ? { importeUSD: (signo * costoCUP) / tasa, tasa } : {}),
+            pago: 'contado',
+            fiscal: false,
+            origen: 'tpv',
+          })
+        }
+      }
+    }
+    // El pago de una compra al contado sale de la caja (o del banco) de la tienda y salda al proveedor.
+    if (opt.cobros && (o.OperType === 1 || o.OperType === 39)) {
+      for (const p of o.Payments ?? []) {
+        const { moneda, monto } = importeCobro(p)
+        if (!monto) continue
+        const efectivo = String(p.PaymentMethod ?? '1') === '1'
+        movimientos.push({
           id: '',
+          libro: efectivo ? 'caja' : 'banco',
           fecha,
           tienda,
-          producto: base.producto,
-          cantidad: signo * q,
-          factura: o.InvoiceNumber || `TPV ${op}`,
-          proveedor: o.PartnerCode != null ? String(o.PartnerCode) : undefined,
-          moneda: 'CUP',
-          importe: total,
-          ...(tasa > 0 ? { importeUSD: total / tasa, tasa } : {}),
-          pago: 'contado',
-          fiscal: false,
+          ...(efectivo ? {} : { cuenta: opt.cuentaBanco || 'FISCAL', fiscal: true }),
+          categoria: 'PAGO AL CONTADO',
+          concepto: `Pago compra TPV ${op}${p.PaymentTypeName ? ` · ${p.PaymentTypeName}` : ''}`,
+          tipo: (o.OperType === 1) === monto > 0 ? 'Salida' : 'Entrada',
+          moneda,
+          monto: Math.abs(monto),
           origen: 'tpv',
         })
       }
