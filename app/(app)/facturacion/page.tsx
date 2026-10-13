@@ -1,3 +1,4 @@
+import Link from 'next/link'
 import { Filtros, Paginacion } from '@/components/Filtros'
 import { TablaRegistros } from '@/components/TablaRegistros'
 import { Encabezado, Kpi } from '@/components/ui'
@@ -52,7 +53,13 @@ export default async function FacturacionPage({ searchParams }: { searchParams: 
   const vencidas = datos.filter((f) => f.afectaER && f._estado === 'Vencida')
   return (
     <>
-      <Encabezado titulo={cfg.titulo} descripcion={cfg.descripcion} />
+      <Encabezado titulo={cfg.titulo} descripcion={cfg.descripcion}>
+        {s.rol !== 'lectura' && (
+          <Link href="/facturacion/tracking" className="btn btn-primario">
+            Traer de Tracking Premium
+          </Link>
+        )}
+      </Encabezado>
       <div className="mb-4 grid gap-3 sm:grid-cols-3">
         <Kpi titulo="Facturas" valor={ds.facturas.length.toLocaleString('es-ES')} sub={`${conER.length.toLocaleString('es-ES')} afectan el ER`} />
         <Kpi titulo="Pendiente de cobro (según sistema)" valor={`${fmt(pend)} USD`} />
