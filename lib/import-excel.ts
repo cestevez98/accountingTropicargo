@@ -556,6 +556,7 @@ export function importarLibro(wb: XLSX.WorkBook): ResultadoImportacion {
     paquetes,
     devengos,
     asientos,
+    reglas: [],
   }
   const resumen = (Object.keys(dataset) as (keyof Dataset)[])
     .filter((k) => k !== 'settings')

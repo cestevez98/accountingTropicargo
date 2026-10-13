@@ -23,6 +23,7 @@ const SECCIONES: { titulo: string; items: (ItemNav & { roles: Rol[] })[] }[] = [
     titulo: 'Registro',
     items: [
       { href: '/movimientos', label: 'Movimientos', roles: TODOS },
+      { href: '/extractos', label: 'Importar extracto bancario', roles: ['admin', 'contador'] },
       { href: '/facturacion', label: 'Facturación', roles: LECTORES },
       { href: '/registros/facturasCompra', label: 'Facturas de proveedores', roles: LECTORES },
       { href: '/registros/pagosProveedor', label: 'Pagos a proveedores', roles: LECTORES },
@@ -38,6 +39,7 @@ const SECCIONES: { titulo: string; items: (ItemNav & { roles: Rol[] })[] }[] = [
     items: [
       { href: '/registros/tasas', label: 'Tasas de cambio', roles: LECTORES },
       { href: '/registros/categorias', label: 'Categorías', roles: LECTORES },
+      { href: '/registros/reglas', label: 'Reglas de categorización', roles: LECTORES },
       { href: '/registros/cuentas', label: 'Cajas y bancos', roles: LECTORES },
       { href: '/apertura', label: 'Apertura y cierres', roles: LECTORES },
       { href: '/importar', label: 'Importar / vaciar datos', roles: ['admin'] },

@@ -247,6 +247,22 @@ export const COLECCIONES: Record<string, ColeccionConfig> = {
       { key: 'fuente', label: 'Fuente', tipo: 'select', opciones: ['eltoque', 'manual'], tabla: true, filtro: true, defecto: 'manual' },
     ],
   },
+  reglas: {
+    key: 'reglas',
+    titulo: 'Reglas de categorización',
+    singular: 'regla',
+    descripcion:
+      'Al importar un extracto, si el concepto contiene el texto de una regla se le asigna su categoría. Las reglas se aplican antes que lo aprendido de los movimientos anteriores. También se crean desde la pantalla de importación con «Recordar».',
+    busqueda: ['contiene', 'categoria'],
+    rolesEditar: EDITORES,
+    etiqueta: (r) => `${r.contiene} → ${r.categoria}`,
+    campos: [
+      { key: 'contiene', label: 'El concepto contiene', tipo: 'texto', requerido: true, tabla: true },
+      { key: 'categoria', label: 'Categoría', tipo: 'select', opciones: 'categorias', requerido: true, tabla: true, filtro: true },
+      { key: 'cuenta', label: 'Solo en la cuenta', tipo: 'select', opciones: 'cuentas', tabla: true, filtro: true, ayuda: 'Vacío = en todas las cuentas.' },
+      { key: 'sentido', label: 'Aplica a', tipo: 'select', opciones: ['ambos', 'entrada', 'salida'], tabla: true, defecto: 'ambos' },
+    ],
+  },
   categorias: {
     key: 'categorias',
     titulo: 'Catálogo de categorías',

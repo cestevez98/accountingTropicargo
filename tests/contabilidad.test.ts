@@ -33,6 +33,7 @@ function base(extra: Partial<Dataset> = {}): Dataset {
     paquetes: [],
     devengos: [],
     asientos: [],
+    reglas: [],
     ...extra,
   }
 }

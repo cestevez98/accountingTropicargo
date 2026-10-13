@@ -229,6 +229,17 @@ export interface AuditEntry {
   detalle?: string
 }
 
+/** Regla de categorización automática para los extractos bancarios. */
+export interface ReglaCategoria {
+  id: string
+  /** Texto que debe aparecer en el concepto (sin distinguir mayúsculas ni acentos). */
+  contiene: string
+  /** Solo para esta cuenta (vacío = todas). */
+  cuenta?: string
+  categoria: string
+  sentido?: 'entrada' | 'salida' | 'ambos'
+}
+
 export interface Dataset {
   settings: Settings
   categorias: Categoria[]
@@ -243,6 +254,7 @@ export interface Dataset {
   paquetes: Paquete[]
   devengos: Devengo[]
   asientos: Asiento[]
+  reglas: ReglaCategoria[]
 }
 
 export type DataCollection = Exclude<keyof Dataset, 'settings'>

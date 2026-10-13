@@ -418,3 +418,135 @@ export async function guardarMargen(margen: number): Promise<Resultado> {
     return fallo(e)
   }
 }
+
+// ---------------------------------------------------------------- extractos bancarios
+
+export interface DatosExtracto {
+  existentes: { id: string; fecha: string; importe: number; referencia?: string; concepto: string }[]
+  reglas: import('@/lib/types').ReglaCategoria[]
+  aprendidas: Record<string, string>
+}
+
+/** Lo que el navegador necesita para analizar un extracto de una cuenta: sus movimientos, las reglas y lo aprendido. */
+export async function prepararExtracto(cuenta: string): Promise<{ ok: true; datos: DatosExtracto } | { ok: false; error: string }> {
+  try {
+    await autorizar(['admin', 'contador'])
+    const { cargarDataset } = await import('@/lib/data')
+    const { claveConcepto } = await import('@/lib/extractos')
+    const ds = await cargarDataset()
+    if (!ds.cuentas.some((c) => c.nombre === cuenta)) throw new Error('Cuenta desconocida.')
+    const existentes = ds.movimientos
+      .filter((m) => m.cuenta === cuenta)
+      .map((m) => ({ id: m.id, fecha: m.fecha, importe: Math.round((m.entrada - m.salida) * 100) / 100, referencia: m.referencia, concepto: m.concepto }))
+    // Aprendizaje: para cada «clave» de concepto, la categoría más usada (si domina claramente).
+    const conteo = new Map<string, Map<string, number>>()
+    const ignorar = new Set(['Por clasificar', 'Saldo inicial'])
+    for (const m of ds.movimientos) {
+      if (ignorar.has(m.categoria)) continue
+      const k = claveConcepto(m.concepto)
+      if (!k) continue
+      const signo = m.entrada - m.salida >= 0 ? '+' : '-'
+      for (const key of [`${m.cuenta}|${signo}|${k}`, `*|${signo}|${k}`]) {
+        const inner = conteo.get(key) ?? new Map<string, number>()
+        inner.set(m.categoria, (inner.get(m.categoria) ?? 0) + 1)
+        conteo.set(key, inner)
+      }
+    }
+    const aprendidas: Record<string, string> = {}
+    for (const [k, inner] of conteo) {
+      const total = [...inner.values()].reduce((a, b) => a + b, 0)
+      const [cat, n] = [...inner.entries()].sort((a, b) => b[1] - a[1])[0]
+      if (n >= 2 && n / total >= 0.6) aprendidas[k] = cat
+    }
+    return { ok: true, datos: { existentes, reglas: ds.reglas ?? [], aprendidas } }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+export interface NuevoDesdeExtracto {
+  fecha: string
+  concepto: string
+  referencia?: string
+  importe: number
+  moneda: 'USD' | 'CUP' | 'EUR'
+  categoria: string
+  extra?: Record<string, string | number>
+}
+
+export async function confirmarExtracto(
+  cuenta: string,
+  archivo: string,
+  nuevos: NuevoDesdeExtracto[],
+  correcciones: { id: string; importe: number }[],
+  reglasNuevas: { contiene: string; categoria: string; sentido: 'entrada' | 'salida' }[],
+): Promise<Resultado> {
+  try {
+    const s = await autorizar(['admin', 'contador'])
+    let creados = 0
+    let corregidos = 0
+    let omitidos = 0
+    await mutar(
+      {
+        movimientos: [] as import('@/lib/types').Movimiento[],
+        categorias: DEFECTOS.categorias,
+        cuentas: DEFECTOS.cuentas,
+        settings: DEFAULT_SETTINGS,
+        reglas: [] as import('@/lib/types').ReglaCategoria[],
+      },
+      ({ movimientos, categorias, cuentas, settings, reglas }) => {
+        creados = corregidos = omitidos = 0
+        if (!cuentas.some((c) => c.nombre === cuenta)) throw new Error('Cuenta desconocida.')
+        const cats = new Set(categorias.map((c) => c.nombre))
+        const refs = new Set(movimientos.filter((m) => m.cuenta === cuenta && m.referencia).map((m) => m.referencia))
+        const cerrado = (f: string) => s.rol !== 'admin' && settings.mesesCerrados.includes(f.slice(0, 7))
+        const agregados: import('@/lib/types').Movimiento[] = []
+        for (const n of nuevos) {
+          if (!esFecha(n.fecha) || !Number.isFinite(n.importe) || !n.importe) throw new Error(`Línea inválida: ${n.fecha} ${n.concepto}`)
+          if (cerrado(n.fecha)) throw new Error(`El mes de ${n.fecha} está cerrado.`)
+          // Protección ante un doble envío: la misma referencia bancaria no se importa dos veces.
+          if (n.referencia && refs.has(n.referencia)) {
+            omitidos++
+            continue
+          }
+          if (n.referencia) refs.add(n.referencia)
+          agregados.push({
+            id: crypto.randomUUID(),
+            fecha: n.fecha,
+            cuenta,
+            categoria: cats.has(n.categoria) ? n.categoria : 'Por clasificar',
+            concepto: n.concepto.slice(0, 300),
+            ...(n.referencia ? { referencia: n.referencia } : {}),
+            moneda: n.moneda,
+            entrada: n.importe > 0 ? n.importe : 0,
+            salida: n.importe < 0 ? -n.importe : 0,
+            observaciones: `Importado del extracto ${archivo}`,
+            ...(n.extra && Object.keys(n.extra).length ? { extra: n.extra } : {}),
+          })
+          creados++
+        }
+        const mapa = new Map(correcciones.map((c) => [c.id, c.importe]))
+        const actualizados = movimientos.map((m) => {
+          const imp = mapa.get(m.id)
+          if (imp == null || m.cuenta !== cuenta) return m
+          if (cerrado(m.fecha)) throw new Error(`El mes de ${m.fecha} está cerrado.`)
+          corregidos++
+          const nota = `Importe corregido según extracto ${archivo} (antes ${(m.entrada - m.salida).toFixed(2)})`
+          return { ...m, entrada: imp > 0 ? imp : 0, salida: imp < 0 ? -imp : 0, observaciones: m.observaciones ? `${m.observaciones} · ${nota}` : nota }
+        })
+        const nuevasReglas = reglasNuevas
+          .filter((r) => r.contiene.trim().length >= 3 && cats.has(r.categoria))
+          .filter((r) => !reglas.some((x) => x.contiene.toLowerCase() === r.contiene.toLowerCase() && (x.cuenta ?? '') === cuenta))
+          .map((r) => ({ id: crypto.randomUUID(), contiene: r.contiene.trim(), categoria: r.categoria, cuenta, sentido: r.sentido }))
+        return { movimientos: [...agregados, ...actualizados], reglas: [...reglas, ...nuevasReglas] }
+      },
+    )
+    await registrarAuditoria([
+      { usuario: s.email, accion: 'importar', coleccion: 'movimientos', detalle: `Extracto ${archivo} (${cuenta}): ${creados} nuevos, ${corregidos} importes corregidos, ${omitidos} omitidos por referencia repetida` },
+    ])
+    refrescar()
+    return { ok: true, mensaje: `${creados} movimientos importados y ${corregidos} importes corregidos${omitidos ? ` (${omitidos} ya estaban por referencia)` : ''}.` }
+  } catch (e) {
+    return fallo(e)
+  }
+}
