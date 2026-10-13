@@ -42,7 +42,9 @@ describe('catálogo maestro', () => {
       { code: '10', nombre: 'Caja', tipo: 1, precioGrupo: 1 },
       { code: '12', nombre: 'PISO 26', tipo: 7, precioGrupo: 2 },
     ])
-    expect(g.get('km26')).toBe('2')
+    // PriceGroup 2 = «grupo 1» = Price1; el 1 es el minorista (precio base).
+    expect(g.get('km26')).toBe('1')
+    expect(gruposPorTienda(tiendas, [{ code: '12', nombre: 'PISO 26', tipo: 7, precioGrupo: 1 }]).has('km26')).toBe(false)
   })
 })
 

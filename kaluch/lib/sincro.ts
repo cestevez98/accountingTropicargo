@@ -60,14 +60,23 @@ export function productoDesdeItem(it: ItemTPV, previo?: Producto): Producto {
   }
 }
 
-/** Grupo de precios que usa cada tienda (el de su piso de venta o, si no, el de cualquiera de sus áreas). */
+/**
+ * Lista de precios (clave de `Producto.precios`: «1» = Price1…) de un PriceGroup de ubicación.
+ * Anexo de la API: 0 mayorista, 1 minorista (Price, el base), 2–9 grupos 1 a 8 (Price1…Price8), 10 costo.
+ * Comprobado con las ventas de octubre: KM 26 (grupo 2) vende a Price1, KM 12 (3) a Price2, San Lázaro (4) a Price3.
+ */
+export function listaDePrecioGrupo(pg: number | undefined) {
+  return pg != null && pg >= 2 && pg <= 9 ? String(pg - 1) : undefined
+}
+
+/** Lista de precios que usa cada tienda (la de su piso de venta o, si no, la de cualquiera de sus áreas). Sin entrada = precio base. */
 export function gruposPorTienda(tiendas: Tienda[], ubic: NonNullable<Settings['axispos']>['ubicaciones'] = []) {
   const porCode = new Map(ubic.map((u) => [u.code, u]))
   const out = new Map<string, string>()
   for (const t of tiendas) {
-    const areas = (t.codigoTPV ?? '').split(',').map((c) => porCode.get(c.trim())).filter((u) => u?.precioGrupo)
-    const u = areas.find((a) => a!.tipo === 7) ?? areas[0]
-    if (u?.precioGrupo) out.set(t.id, String(u.precioGrupo))
+    const areas = (t.codigoTPV ?? '').split(',').map((c) => porCode.get(c.trim())).filter((u) => u?.precioGrupo != null)
+    const lista = listaDePrecioGrupo((areas.find((a) => a!.tipo === 7) ?? areas[0])?.precioGrupo)
+    if (lista) out.set(t.id, lista)
   }
   return out
 }
@@ -160,6 +169,8 @@ export interface FilaCuadreExistencia {
 export function cuadreExistencias(filas: FilaInventario[], disponibles: DisponibleTPV[], productos: Producto[], tiendas: Tienda[]) {
   const tiendaDeArea = new Map<string, string>()
   for (const t of tiendas) for (const c of (t.codigoTPV ?? '').split(',')) if (c.trim()) tiendaDeArea.set(c.trim(), t.id)
+  // Las líneas de «ESTADISTICA» (PAX) solo cuentan clientes: no son mercancía.
+  const estadistica = new Set(productos.filter((p) => (p.grupo ?? '').toUpperCase() === 'ESTADISTICA').flatMap((p) => [p.codigo, p.nombre]))
   const codigoDe = new Map(productos.filter(tieneCodigo).map((p) => [p.nombre, p.codigo]))
   const nombreDe = new Map(productos.filter(tieneCodigo).map((p) => [p.codigo, p.nombre]))
   const tpv = new Map<string, number>()
@@ -181,7 +192,7 @@ export function cuadreExistencias(filas: FilaInventario[], disponibles: Disponib
   const filasOut: FilaCuadreExistencia[] = []
   for (const k of new Set([...tpv.keys(), ...kal.keys()])) {
     const [tienda, codigo] = k.split('|')
-    if (!tiendas.some((t) => t.id === tienda && t.codigoTPV)) continue
+    if (!tiendas.some((t) => t.id === tienda && t.codigoTPV) || estadistica.has(codigo)) continue
     const a = kal.get(k)
     const kq = r2(a?.q ?? 0)
     const tq = r2(tpv.get(k) ?? 0)
