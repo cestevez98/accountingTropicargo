@@ -529,7 +529,8 @@ export async function confirmarExtracto(
         creados = corregidos = omitidos = borrados = 0
         if (!cuentas.some((c) => c.nombre === cuenta)) throw new Error('Cuenta desconocida.')
         const cats = new Set(categorias.map((c) => c.nombre))
-        const refs = new Set(movimientos.filter((m) => m.cuenta === cuenta && m.referencia).map((m) => m.referencia))
+        // Las líneas que se borran en este mismo envío no cuentan: su referencia puede volver con el importe correcto.
+        const refs = new Set(movimientos.filter((m) => m.cuenta === cuenta && m.referencia && !borrar.includes(m.id)).map((m) => m.referencia))
         const cerrado = (f: string) => s.rol !== 'admin' && settings.mesesCerrados.includes(f.slice(0, 7))
         const agregados: import('@/lib/types').Movimiento[] = []
         for (const n of nuevos) {
