@@ -2,121 +2,130 @@ import { notFound } from 'next/navigation'
 import { requerirUsuario, tiendaFija } from '@/lib/auth'
 import { cargarDataset } from '@/lib/data'
 import { params, type SP } from '@/lib/pagina'
-import type { Moneda } from '@/lib/types'
+import { revisaArqueos } from '@/lib/permisos'
+import { BILLETES_CUP } from '@/lib/turno'
 import { Imprimir } from '../Imprimir'
 
 const f2 = (n: number | undefined) => (n ?? 0).toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const hora = (h: string) => h.replace('T', ' ').slice(0, 16)
 
-/** Comprobante de arqueo de caja (imprimible / PDF). */
-export default async function ComprobanteArqueo({ searchParams }: { searchParams: SP }) {
+function Fila({ label, valor, fuerte }: { label: React.ReactNode; valor?: React.ReactNode; fuerte?: boolean }) {
+  return (
+    <tr className="border-b border-gray-400">
+      <td className={`px-2 py-0.5 ${fuerte ? 'font-bold' : ''}`}>{label}</td>
+      <td className={`px-2 text-right ${fuerte ? 'font-bold' : ''}`}>{valor}</td>
+    </tr>
+  )
+}
+
+/** Comprobante del cuadre de cambio de turno (modelo «Cuadre diario»), imprimible o en PDF. */
+export default async function ComprobanteCuadre({ searchParams }: { searchParams: SP }) {
   const s = await requerirUsuario('arqueo')
   const sp = await params(searchParams)
   const ds = await cargarDataset()
   const a = ds.arqueos.find((x) => x.id === sp.id)
   const fija = tiendaFija(s)
-  if (!a || (fija && a.tienda !== fija)) notFound()
+  if (!a || (fija && a.tienda !== fija) || (!revisaArqueos(s.rol) && a.usuario !== s.email)) notFound()
   const tienda = ds.tiendas.find((t) => t.id === a.tienda)?.nombre ?? a.tienda
-  const monedas = [...new Set([...Object.keys(a.contado), ...Object.keys(a.esperado)])].filter((m) => a.contado[m as Moneda] || a.esperado[m as Moneda]) as Moneda[]
-  const hora = new Date(a.ts).toLocaleString('es-ES', { timeZone: 'America/Havana', dateStyle: 'short', timeStyle: 'short' })
+  const cant = new Map(a.billetes.map((b) => [b.valor, b.cantidad]))
+  const subtotal = a.ventaTienda + a.domicilio + a.plataforma
+  const totalCUP = a.billetes.reduce((x, b) => x + b.valor * b.cantidad, 0) + a.sueltosCUP
   return (
-    <div className="mx-auto max-w-2xl bg-white p-6 text-black">
+    <div className="mx-auto max-w-3xl bg-white p-6 text-[13px] text-black">
       <Imprimir />
-      <div className="flex items-start justify-between border-b-2 border-black pb-2">
+      <div className="flex items-start justify-between">
         <div>
-          <h1 className="text-xl font-bold">{ds.settings.empresa}</h1>
-          <div className="text-sm">Comprobante de arqueo de caja</div>
+          <h1 className="text-lg font-bold">{ds.settings.empresa}</h1>
+          <div className="font-semibold">MODELO DE CUADRE DIARIO · cambio de turno</div>
         </div>
         <div className="text-right">
           <div className="text-lg font-bold">No. {String(a.numero).padStart(6, '0')}</div>
-          <div className="text-sm">{hora}</div>
+          <div>{a.estado === 'aprobado' ? `Aprobado por ${a.revisadoPor}` : 'Pendiente de revisión'}</div>
         </div>
       </div>
-      <table className="mt-3 w-full text-sm">
+      <table className="mt-2 w-full border border-black">
         <tbody>
-          <tr>
-            <td className="w-40 py-0.5 font-semibold">Tienda</td>
-            <td>{tienda}</td>
+          <tr className="border-b border-black">
+            <td className="px-2 py-1">
+              <b>Tienda:</b> {tienda} · {a.cajaNombre}
+            </td>
+            <td className="px-2">
+              <b>Cajero(a):</b> {a.cajero}
+            </td>
           </tr>
           <tr>
-            <td className="py-0.5 font-semibold">Cajero/a</td>
-            <td>{a.cajero ?? '—'}</td>
+            <td className="px-2 py-1">
+              <b>Turno:</b> {hora(a.desde)} → {hora(a.hasta)}
+            </td>
+            <td className="px-2">
+              <b>Tickets en el TPV:</b> {a.tpv.tickets}
+            </td>
           </tr>
-          <tr>
-            <td className="py-0.5 font-semibold">Realizado por</td>
-            <td>{a.nombreUsuario ?? a.usuario}</td>
-          </tr>
-          {a.nota && (
-            <tr>
-              <td className="py-0.5 font-semibold">Nota</td>
-              <td>{a.nota}</td>
-            </tr>
-          )}
         </tbody>
       </table>
-      <h2 className="mt-4 font-semibold">Detalle del efectivo</h2>
-      <table className="mt-1 w-full border-collapse text-sm">
-        <thead>
-          <tr className="border-b border-black">
-            <th className="py-1 text-left">Moneda</th>
-            <th className="text-right">Denominación</th>
-            <th className="text-right">Cantidad</th>
-            <th className="text-right">Importe</th>
-          </tr>
-        </thead>
-        <tbody>
-          {a.detalle.map((d) => (
-            <tr key={`${d.moneda}${d.valor}`} className="border-b border-gray-300">
-              <td className="py-0.5">{d.moneda}</td>
-              <td className="text-right">{d.valor}</td>
-              <td className="text-right">{d.cantidad}</td>
-              <td className="text-right">{f2(d.valor * d.cantidad)}</td>
-            </tr>
-          ))}
-          {(Object.entries(a.otros ?? {}) as [Moneda, number][])
-            .filter(([, v]) => v)
-            .map(([m, v]) => (
-              <tr key={`o${m}`} className="border-b border-gray-300">
-                <td className="py-0.5">{m}</td>
-                <td className="text-right">Sueltos</td>
-                <td />
-                <td className="text-right">{f2(v)}</td>
-              </tr>
+      <div className="mt-2 grid grid-cols-2 gap-3">
+        <table className="w-full border border-black">
+          <tbody>
+            <Fila label="Venta en tienda (TPV)" valor={f2(a.ventaTienda)} />
+            <Fila label="Venta a domicilio" valor={a.domicilio ? f2(a.domicilio) : ''} />
+            <Fila label="Venta en plataforma" valor={a.plataforma ? f2(a.plataforma) : ''} />
+            <Fila label="Subtotal" valor={f2(subtotal)} fuerte />
+            <Fila label={<b>Otros gastos</b>} />
+            {a.gastos.map((g, i) => (
+              <Fila key={i} label={g.concepto} valor={f2(g.importe)} />
             ))}
-        </tbody>
-      </table>
-      <h2 className="mt-4 font-semibold">Resumen</h2>
-      <table className="mt-1 w-full border-collapse text-sm">
-        <thead>
-          <tr className="border-b border-black">
-            <th className="py-1 text-left">Moneda</th>
-            <th className="text-right">Contado</th>
-            <th className="text-right">Según sistema</th>
-            <th className="text-right">Diferencia</th>
-          </tr>
-        </thead>
+            <Fila label="Salario" valor={f2(a.salario)} />
+            <Fila label="Cant. trabajadores" valor={a.trabajadores} />
+            <Fila label={<b>Total transferencias</b>} valor={f2(a.transferencias.reduce((x, t) => x + t.importe, 0))} />
+            {a.transferencias.map((t, i) => (
+              <Fila key={i} label={t.cuenta} valor={f2(t.importe)} />
+            ))}
+            <Fila label="Ventas por cobrar" valor={a.porCobrar ? f2(a.porCobrar) : ''} />
+          </tbody>
+        </table>
+        <table className="w-full border border-black">
+          <tbody>
+            {BILLETES_CUP.filter((b) => b >= 5 || cant.get(b)).map((b) => (
+              <Fila key={b} label={`${b} ×  ${cant.get(b) ?? ''}`} valor={cant.get(b) ? f2(b * cant.get(b)!) : ''} />
+            ))}
+            {a.sueltosCUP ? <Fila label="Sueltos" valor={f2(a.sueltosCUP)} /> : null}
+            <Fila label="Total efectivo CUP" valor={f2(totalCUP)} fuerte />
+            <Fila label={`USD ${a.usd || ''} × ${a.usd ? a.tasaUSD : ''}`} valor={a.usd ? f2(a.usd * a.tasaUSD) : ''} />
+            <Fila label={`EUR ${a.eur || ''} × ${a.eur ? a.tasaEUR : ''}`} valor={a.eur ? f2(a.eur * a.tasaEUR) : ''} />
+            {a.otros ? <Fila label="Otros" valor={f2(a.otros)} /> : null}
+            {a.fondo ? <Fila label="Fondo que queda en caja" valor={f2(a.fondo)} /> : null}
+          </tbody>
+        </table>
+      </div>
+      <table className="mt-3 w-full border-2 border-black text-sm">
         <tbody>
-          {monedas.map((m) => {
-            const d = (a.contado[m] ?? 0) - (a.esperado[m] ?? 0)
-            return (
-              <tr key={m} className="border-b border-gray-300">
-                <td className="py-0.5 font-semibold">{m}</td>
-                <td className="text-right">{f2(a.contado[m])}</td>
-                <td className="text-right">{f2(a.esperado[m])}</td>
-                <td className="text-right font-semibold">
-                  {Math.abs(d) < 0.005 ? 'Cuadra' : `${d > 0 ? 'Sobrante +' : 'Faltante '}${f2(d)}`}
-                </td>
-              </tr>
-            )
-          })}
+          <Fila label="Efectivo esperado (subtotal − transferencias − por cobrar − gastos − salario)" valor={f2(a.esperado)} />
+          <Fila label="Total de efectivo" valor={f2(a.contado)} fuerte />
+          <Fila label="Diferencia" valor={Math.abs(a.diferencia) < 0.5 ? 'Cuadra' : `${a.diferencia > 0 ? 'Sobrante +' : 'Faltante '}${f2(a.diferencia)}`} fuerte />
         </tbody>
       </table>
-      <p className="mt-2 text-xs">
-        «Según sistema»: saldo de la caja en Kaluch Accounting (cobros en efectivo del TPV − gastos − entregas a la caja central) al momento del arqueo.
-        {a.avisoEsperado ? ` ${a.avisoEsperado}` : ''}
+      {Object.keys(a.tpv.porCajero).length > 1 && (
+        <p className="mt-2">
+          <b>Venta por cajero en el TPV:</b>{' '}
+          {Object.entries(a.tpv.porCajero)
+            .map(([k, v]) => `${k} ${f2(v)}`)
+            .join(' · ')}
+        </p>
+      )}
+      <p className="mt-1">
+        <b>Cobros en el TPV:</b> efectivo {f2(a.tpv.efectivo)}
+        {Object.entries(a.tpv.noEfectivo).map(([k, v]) => ` · ${k} ${f2(v)}`)}
       </p>
-      <div className="mt-16 grid grid-cols-2 gap-10 text-center text-sm">
+      {a.observaciones && (
+        <p className="mt-1">
+          <b>Observaciones:</b> {a.observaciones}
+        </p>
+      )}
+      {a.avisoTPV && <p className="mt-1 italic">{a.avisoTPV}</p>}
+      <div className="mt-14 grid grid-cols-3 gap-8 text-center">
         <div className="border-t border-black pt-1">Entrega (cajero/a)</div>
-        <div className="border-t border-black pt-1">Recibe / Revisa</div>
+        <div className="border-t border-black pt-1">Recibe (turno siguiente)</div>
+        <div className="border-t border-black pt-1">Revisa (contador/a)</div>
       </div>
     </div>
   )

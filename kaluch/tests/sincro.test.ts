@@ -87,7 +87,7 @@ describe('cuadre de caja', () => {
   })
 })
 
-import { indiceEscaner, resultadoConteo, sumarLectura, totalArqueo, catalogoEscaner } from '../lib/conteo'
+import { indiceEscaner, resultadoConteo, sumarLectura, catalogoEscaner } from '../lib/conteo'
 
 describe('conteo a ciegas', () => {
   it('reconoce código interno y códigos de barras, y acumula lecturas', () => {
@@ -119,17 +119,95 @@ describe('conteo a ciegas', () => {
   })
 })
 
-describe('arqueo', () => {
-  it('suma billetes y sueltos por moneda', () => {
-    expect(
-      totalArqueo(
-        [
-          { moneda: 'CUP', valor: 1000, cantidad: 3 },
-          { moneda: 'CUP', valor: 20, cantidad: 2 },
-          { moneda: 'USD', valor: 20, cantidad: 1 },
-        ],
-        { CUP: 2.5 },
-      ),
-    ).toEqual({ CUP: 3042.5, USD: 20 })
+
+import { calcularCuadre, horaCuba, resumenTurno, salarioSugerido } from '../lib/turno'
+
+describe('cuadre de cambio de turno', () => {
+  it('reproduce la hoja del 11/10 (César): esperado 148.250 y contado 153.065', () => {
+    const c = calcularCuadre({
+      ventaTienda: 160560,
+      domicilio: 0,
+      plataforma: 0,
+      gastos: [{ concepto: 'Seguridad', importe: 2500 }],
+      salario: salarioSugerido(160560, 0.03),
+      transferencias: [{ cuenta: 'FISCAL', importe: 5000 }],
+      porCobrar: 0,
+      billetes: [
+        { valor: 5000, cantidad: 4 },
+        { valor: 2000, cantidad: 3 },
+        { valor: 1000, cantidad: 40 },
+        { valor: 500, cantidad: 35 },
+        { valor: 200, cantidad: 171 },
+        { valor: 100, cantidad: 39 },
+        { valor: 50, cantidad: 153 },
+        { valor: 20, cantidad: 2 },
+      ],
+      sueltosCUP: 0,
+      usd: 5,
+      tasaUSD: 755,
+      eur: 0,
+      tasaEUR: 0,
+      otros: 20000,
+    })
+    expect(salarioSugerido(160560, 0.03)).toBe(4810)
+    expect(c).toMatchObject({ subtotal: 160560, esperado: 148250, billetesCUP: 129290, usdCUP: 3775, contado: 153065, diferencia: 4815 })
+  })
+
+  it('suma solo los tickets de la caja dentro del turno, por moneda y por cajero', () => {
+    const ops = [
+      { OperType: 2, Date: '2026-10-11', DateIssued: '2026-10-11T07:59:59', UserCode: '5', Payments: [{ PaymentMethod: '1', AmountTotal: 999 }] },
+      { OperType: 2, Date: '2026-10-11', DateIssued: '2026-10-11T08:30:00', UserCode: '5', Payments: [{ PaymentMethod: '1', AmountTotal: 1000, CurrencyName: 'CUP', CurrencyRate: 1 }] },
+      { OperType: 2, Date: '2026-10-11', DateIssued: '2026-10-11T09:00:00', UserCode: '6', Payments: [{ PaymentMethod: '1', AmountTotal: 7700, CurrencyName: 'USD', CurrencyRate: 770 }, { PaymentMethod: '2', PaymentTypeName: 'Tarjeta', AmountTotal: 500 }] },
+      { OperType: 34, Date: '2026-10-11', DateIssued: '2026-10-11T10:00:00', UserCode: '5', Payments: [{ PaymentMethod: '1', AmountTotal: 200 }] },
+      { OperType: 3, Date: '2026-10-11', DateIssued: '2026-10-11T10:00:00', Payments: [] },
+    ]
+    const r = resumenTurno(ops, '2026-10-11T08:00:00', '2026-10-11T20:00:00', new Map([['5', 'YARA'], ['6', 'CESAR']]))
+    expect(r).toMatchObject({ tickets: 3, venta: 9000, efectivo: 8500, noEfectivo: { Tarjeta: 500 }, efectivoPorMoneda: { CUP: 800, USD: 10 }, tasas: { USD: 770 }, porCajero: { YARA: 800, CESAR: 8200 } })
+  })
+
+  it('hora de Cuba', () => {
+    expect(horaCuba(new Date('2026-10-13T04:30:00Z'))).toBe('2026-10-13T00:30:00')
+  })
+})
+
+import { operacionAjuste } from '../lib/axispos-envio'
+
+describe('ajuste de conteo', () => {
+  it('una línea por diferencia, con signo y costo en CUP', () => {
+    const op = operacionAjuste(
+      { id: 'c1', numero: 1, tienda: 'km26', fecha: '2026-10-13', usuario: 'x', estado: 'cerrado', inicio: '2026-10-13T05:00:00Z', cierre: '2026-10-13T06:00:00Z', lineas: [], resultado: [
+        { codigo: '100', nombre: 'ARROZ', contado: 8, sistema: 9, diferencia: -1, costoUSD: 0.5 },
+        { codigo: '200', nombre: 'FRIJOL', contado: 5, sistema: 5, diferencia: 0 },
+        { codigo: '300', nombre: 'PAN', contado: 3, sistema: 1, diferencia: 2 },
+      ] },
+      900001, '12', '2', [{ codigo: '300', nombre: 'PAN', costoCUP: 50, precioCUP: 80 }], 780,
+    )
+    expect(op).toMatchObject({ OperType: 4, ObjectCode: '12', Note: 'KA:c1', Acct: 900001 })
+    expect(op.Items).toEqual([
+      { ItemCode: '100', ItemName: 'ARROZ', Qtty: -1, Discount: 0, Price: 390, PriceIn: 390, AmountTotal: -390 },
+      { ItemCode: '300', ItemName: 'PAN', Qtty: 2, Discount: 0, Price: 80, PriceIn: 50, AmountTotal: 100 },
+    ])
+  })
+})
+
+import { propuestasCasar } from '../lib/casar'
+
+describe('casar productos del Excel con el TPV', () => {
+  it('seguro solo si coincide salvo tildes, signos u orden; el resto se sugiere', () => {
+    const productos = [
+      { codigo: '1', nombre: 'LAVAVAJILLAS PASTA TOTAL CARE 200G' },
+      { codigo: '2', nombre: 'GEL DE BAÑO ORCHID SIMPLY' },
+      { codigo: '3', nombre: 'ACONDICIONADOR VOLUMEN SIMPLY BODYCARE' },
+      { codigo: 'LAVAVAJILLAS PASTA 200G TOTAL CARE', nombre: 'LAVAVAJILLAS PASTA 200G TOTAL CARE' },
+      { codigo: 'GEL DE BANO ORCHID', nombre: 'GEL DE BANO ORCHID' },
+      { codigo: 'CHAMPU VOLUMEN SIMPLY BODYCARE', nombre: 'CHAMPU VOLUMEN SIMPLY BODYCARE' },
+    ]
+    const r = propuestasCasar(productos, new Map([['CHAMPU VOLUMEN SIMPLY BODYCARE', 9]]))
+    const de = (n: string) => r.find((x) => x.nombre === n)!
+    expect(de('LAVAVAJILLAS PASTA 200G TOTAL CARE')).toMatchObject({ seguro: true, candidatos: [{ codigo: '1' }] })
+    expect(de('GEL DE BANO ORCHID').seguro).toBe(false)
+    expect(de('GEL DE BANO ORCHID').candidatos[0].codigo).toBe('2')
+    expect(de('CHAMPU VOLUMEN SIMPLY BODYCARE')).toMatchObject({ seguro: false, uso: 9 })
+    expect(r[0].seguro).toBe(true)
   })
 })

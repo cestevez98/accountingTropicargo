@@ -1,14 +1,15 @@
-import { accionCategoria, accionSettings, accionTienda, accionUsuario, accionVaciar } from '../../acciones'
+import { accionCasar, accionCasarSeguros, accionCategoria, accionSettings, accionTienda, accionUsuario, accionVaciar } from '../../acciones'
 import { FormAccion } from '@/components/FormAccion'
 import { FormProducto } from './FormProducto'
-import { Chip, Encabezado, Paginador, Pestanas, url } from '@/components/ui'
+import { Chip, Encabezado, Paginador, Pestanas, url, Vacio } from '@/components/ui'
 import { puedeRegistrar, requerirUsuario } from '@/lib/auth'
 import { ETIQUETA_CUENTA, LINEA_LABEL, TIPO_ENTIDAD_LABEL } from '@/lib/catalogo'
 import { cargarDataset, leerAuditoria, leerUsuarios } from '@/lib/data'
 import { params, type SP } from '@/lib/pagina'
-import { ROLES, ROLES_LISTA } from '@/lib/permisos'
+import { ROLES, ROLES_LISTA, esAdminEconomica } from '@/lib/permisos'
 import type { Categoria, Tienda } from '@/lib/types'
 import { prepararTasas, tasaVigente } from '@/lib/fx'
+import { propuestasCasar } from '@/lib/casar'
 import { GRUPOS_PRECIO, gruposPorTienda, precioEnTienda, precioWeb } from '@/lib/sincro'
 
 const FLUJO = { explotacion: 'Explotación', inversion: 'Inversión', financiacion: 'Financiación', interno: 'Interno' }
@@ -16,11 +17,12 @@ const FLUJO = { explotacion: 'Explotación', inversion: 'Inversión', financiaci
 export default async function Catalogos({ searchParams }: { searchParams: SP }) {
   const s = await requerirUsuario('catalogos')
   const sp = await params(searchParams)
-  const admin = s.rol === 'propietario' || s.rol === 'admin'
+  const admin = esAdminEconomica(s.rol)
   const tabs = [
     { clave: 'tiendas', label: 'Tiendas' },
     { clave: 'categorias', label: 'Categorías' },
     { clave: 'productos', label: 'Productos' },
+    { clave: 'casar', label: 'Casar con el TPV' },
     ...(admin ? [{ clave: 'usuarios', label: 'Usuarios' }, { clave: 'config', label: 'Configuración' }, { clave: 'auditoria', label: 'Auditoría' }] : []),
   ]
   const tab = tabs.some((t) => t.clave === sp.tab) ? sp.tab! : 'tiendas'
@@ -222,6 +224,57 @@ export default async function Catalogos({ searchParams }: { searchParams: SP }) 
             <FormProducto sel={sel} barrasInicial={sp.barras} grupos={GRUPOS_PRECIO.filter((g) => etiquetaGrupo.has(g) || sel?.precios?.[g]).map((g) => ({ g, etiqueta: etiquetaGrupo.get(g) ?? `grupo ${g}` }))} />
           </div>
         )}
+      </>
+    )
+  } else if (tab === 'casar') {
+    const uso = new Map<string, number>()
+    for (const x of [...ds.salidas, ...ds.compras]) if (x.producto) uso.set(x.producto, (uso.get(x.producto) ?? 0) + 1)
+    const todas = propuestasCasar(ds.productos, uso)
+    const seguros = todas.filter((p) => p.seguro).length
+    const pagina = Math.max(1, Number(sp.p) || 1)
+    const vista = todas.slice((pagina - 1) * 40, pagina * 40)
+    cuerpo = (
+      <>
+        <p className="mb-3 text-sm text-muted-foreground">
+          {todas.length} productos vienen de los Excel solo con nombre, sin el <b>código interno del TPV</b> (el «Code» de AxisPOS, no el código de barras). Casarlos los une con la mercancía del TPV: sus ventas y compras pasan a ese producto y queda uno solo. Primero los que más se usan.
+        </p>
+        {editar && seguros > 0 && (
+          <div className="tarjeta mb-3 p-3 text-sm">
+            <b>{seguros}</b> coinciden con seguridad (mismo nombre salvo tildes, signos u orden de las palabras).
+            <FormAccion accion={accionCasarSeguros} boton={`Casar los ${seguros} seguros`} claseBoton="btn btn-exito ml-2" confirmar={`¿Casar automáticamente ${seguros} productos?`}>
+              {null}
+            </FormAccion>
+          </div>
+        )}
+        {vista.length ? (
+          <FormAccion accion={accionCasar} boton="Casar los elegidos" claseBoton="btn btn-primario mt-3">
+            <div className="tarjeta divide-y divide-border">
+              {vista.map((p, i) => (
+                <div key={p.nombre} className="grid gap-2 p-3 md:grid-cols-[18rem_1fr]">
+                  <div>
+                    <input type="hidden" name={`e_${i}`} value={p.nombre} />
+                    <div className="text-sm font-medium">{p.nombre}</div>
+                    <div className="text-xs text-muted-foreground">{p.uso} ventas/compras {p.seguro && <Chip tono="verde">Seguro</Chip>}</div>
+                  </div>
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+                    {p.candidatos.map((c) => (
+                      <label key={c.codigo} className="inline-flex items-center gap-1">
+                        <input type="radio" name={`m_${i}`} value={c.nombre} defaultChecked={p.seguro && c === p.candidatos[0]} />
+                        {c.nombre} <span className="text-xs text-muted-foreground">({c.codigo} · {Math.round(c.parecido * 100)} %)</span>
+                      </label>
+                    ))}
+                    <label className="inline-flex items-center gap-1 text-muted-foreground">
+                      <input type="radio" name={`m_${i}`} value="" defaultChecked={!p.seguro} /> {p.candidatos.length ? 'Ninguno' : 'Sin parecidos en el TPV'}
+                    </label>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </FormAccion>
+        ) : (
+          <Vacio>Todos los productos están casados con el TPV.</Vacio>
+        )}
+        <Paginador pagina={pagina} total={todas.length} porPagina={40} base={(p) => url('/catalogos', sp, { p })} />
       </>
     )
   } else if (tab === 'usuarios') {

@@ -9,6 +9,7 @@ import { aUSD } from '@/lib/fx'
 import { CLASE_CUENTA, etiquetaCuenta, nombreMes } from '@/lib/informes'
 import { distribucionDelMes, esEfectivo, FUENTE_LABEL, type Linea } from '@/lib/mayor'
 import { params, tiendaActiva, type SP } from '@/lib/pagina'
+import { esAdminEconomica } from '@/lib/permisos'
 
 const TABS = [
   { clave: 'nomenclador', label: 'Nomenclador de cuentas' },
@@ -398,7 +399,7 @@ export default async function Contabilidad({ searchParams }: { searchParams: SP 
     )
   } else {
     const meses = mesesEntre(ds.settings.fechaInicio.slice(0, 7), mayor.ultimoMes)
-    const admin = s.rol === 'propietario' || s.rol === 'admin'
+    const admin = esAdminEconomica(s.rol)
     cuerpo = (
       <div className="tarjeta overflow-x-auto">
         <table className="tabla">

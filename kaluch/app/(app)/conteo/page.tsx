@@ -1,10 +1,11 @@
-import { accionConteoAbrir } from '../../acciones'
+import { accionConteoAbrir, accionConteoAprobarAjuste } from '../../acciones'
 import { FormAccion } from '@/components/FormAccion'
 import { Chip, Encabezado, Vacio, url } from '@/components/ui'
 import { requerirUsuario, tiendaFija } from '@/lib/auth'
 import { catalogoEscaner } from '@/lib/conteo'
 import { cargarDataset, preferencias } from '@/lib/data'
 import { params, type SP } from '@/lib/pagina'
+import { revisaConteos } from '@/lib/permisos'
 import { Escaner } from './Escaner'
 
 const f2 = (n: number | undefined) => (n == null ? '' : n.toLocaleString('es-ES', { maximumFractionDigits: 2 }))
@@ -14,14 +15,24 @@ export default async function Conteo({ searchParams }: { searchParams: SP }) {
   const s = await requerirUsuario('conteo')
   const sp = await params(searchParams)
   const ds = await cargarDataset()
-  const admin = s.rol === 'propietario' || s.rol === 'admin'
+  const admin = revisaConteos(s.rol)
   const fija = tiendaFija(s)
   const pref = await preferencias()
   const tiendas = ds.tiendas.filter((t) => t.activa && t.codigoTPV && (!fija || t.id === fija))
   const tienda = fija ?? (sp.t && tiendas.some((t) => t.id === sp.t) ? sp.t : pref.tienda && tiendas.some((t) => t.id === pref.tienda) ? pref.tienda : undefined)
   const nombreT = new Map(ds.tiendas.map((t) => [t.id, t.nombre]))
   const abierto = tienda ? ds.conteos.find((c) => c.tienda === tienda && c.estado === 'abierto') : undefined
-  const sel = admin && sp.id ? ds.conteos.find((c) => c.id === sp.id) : undefined
+  const sel = admin && sp.id ? ds.conteos.find((c) => c.id === sp.id && (!fija || c.tienda === fija)) : undefined
+  const ubic = new Map((ds.settings.axispos?.ubicaciones ?? []).map((u) => [u.code, u]))
+  const areaNombre = (c: string) => ubic.get(c)?.nombre ?? c
+  // Piso de venta primero: es donde se cuenta normalmente.
+  const areasTienda = (t: string) =>
+    (ds.tiendas.find((x) => x.id === t)?.codigoTPV ?? '')
+      .split(',')
+      .map((c) => c.trim())
+      .filter(Boolean)
+      .sort((a, b) => (ubic.get(b)?.tipo === 7 ? 1 : 0) - (ubic.get(a)?.tipo === 7 ? 1 : 0))
+      .map((c) => ({ code: c, nombre: areaNombre(c) }))
   const historia = ds.conteos.filter((c) => c.estado === 'cerrado' && (!fija || c.tienda === fija)).slice(0, 60)
 
   if (sel?.resultado || sel?.errorSistema) {
@@ -35,6 +46,31 @@ export default async function Conteo({ searchParams }: { searchParams: SP }) {
           </a>
         </Encabezado>
         {sel.errorSistema && <div className="tarjeta mb-3 border-l-4 border-l-danger p-3 text-sm">No se pudo comparar con el TPV: {sel.errorSistema}</div>}
+        {sel.resultado && conDif.length > 0 && (
+          <div className="tarjeta mb-3 p-3 text-sm">
+            {sel.ajuste ? (
+              <>
+                Ajuste aprobado por <b>{sel.ajuste.aprobadoPor}</b> el {sel.ajuste.aprobadoEn.slice(0, 10)} en el área {areaNombre(sel.ajuste.area)} ·{' '}
+                {sel.ajuste.axis?.enviada ? <Chip tono="verde">Pasado al TPV</Chip> : <Chip tono="ambar">Pendiente de pasar al TPV</Chip>}
+              </>
+            ) : (
+              <FormAccion accion={accionConteoAprobarAjuste} boton="Aprobar ajuste" claseBoton="btn btn-exito" limpiar={false} confirmar={`¿Aprobar el ajuste de ${conDif.length} productos?`}>
+                <input type="hidden" name="id" value={sel.id} />
+                <label className="mr-2 inline-flex items-center gap-2">
+                  Área donde se ajusta:
+                  <select name="area" className="input w-auto">
+                    {areasTienda(sel.tienda).map((a) => (
+                      <option key={a.code} value={a.code}>
+                        {a.nombre}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </FormAccion>
+            )}
+            <p className="mt-1 text-xs text-muted-foreground">El ajuste se aplica en el TPV (dueño de las cantidades) y vuelve solo a la contabilidad en la sincronización. Mientras la integración esté en modo ensayo, hazlo en AxisPOS con estas cantidades.</p>
+          </div>
+        )}
         <div className="mb-3 text-sm">
           {sel.lineas.length} productos contados · <strong>{conDif.length}</strong> con diferencia · valor {f2(valor)} USD {sel.nota && <>· Nota: {sel.nota}</>}
         </div>
@@ -119,6 +155,7 @@ export default async function Conteo({ searchParams }: { searchParams: SP }) {
                 <th>Contó</th>
                 <th className="num">Productos</th>
                 {admin && <th className="num">Con diferencia</th>}
+                {admin && <th>Ajuste</th>}
                 {admin && <th />}
               </tr>
             </thead>
@@ -131,6 +168,7 @@ export default async function Conteo({ searchParams }: { searchParams: SP }) {
                   <td className="text-xs">{c.nombreUsuario ?? c.usuario}</td>
                   <td className="num">{c.lineas.length}</td>
                   {admin && <td className="num">{c.resultado ? c.resultado.filter((r) => r.diferencia).length : <Chip tono="rojo">Sin comparar</Chip>}</td>}
+                  {admin && <td>{c.ajuste ? <Chip tono={c.ajuste.axis?.enviada ? 'verde' : 'ambar'}>{c.ajuste.axis?.enviada ? 'En el TPV' : 'Aprobado'}</Chip> : c.resultado?.some((r) => r.diferencia) ? <Chip tono="gris">Por revisar</Chip> : ''}</td>}
                   {admin && (
                     <td>
                       <a className="text-xs text-primary hover:underline" href={url('/conteo', {}, { id: c.id })}>

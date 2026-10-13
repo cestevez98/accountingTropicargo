@@ -8,8 +8,10 @@ import { autorizar, cerrarSesion, hashPassword, iniciarSesion, tiendaFija, verif
 import { clienteAxis, sincronizarAxis } from '@/lib/axis-servidor'
 import { escrituraAxis, mapaAreas, proponerAreas } from '@/lib/axispos'
 import { monedasConTasa, notaKA, prepararEnvioCompra, SERIE_INICIAL } from '@/lib/axispos-envio'
-import { cuadreCaja, esEntrega, GRUPOS_PRECIO, movimientosEntrega, productoDesdeItem } from '@/lib/sincro'
-import { DENOMINACIONES, resultadoConteo, totalArqueo } from '@/lib/conteo'
+import { esEntrega, GRUPOS_PRECIO, movimientosEntrega, productoDesdeItem } from '@/lib/sincro'
+import { resultadoConteo } from '@/lib/conteo'
+import { esDelTPV, propuestasCasar } from '@/lib/casar'
+import { BILLETES_CUP, calcularCuadre, horaCuba, resumenTurno, salarioSugerido, type ResumenTurno } from '@/lib/turno'
 import { DEFAULT_SETTINGS } from '@/lib/catalogo'
 import { cargarDataset, leerUsuarios, registrarAuditoria } from '@/lib/data'
 import { COLECCIONES_OPERATIVAS, DEFECTOS } from '@/lib/defectos'
@@ -17,7 +19,7 @@ import { esFecha, ym } from '@/lib/fecha'
 import { aUSD, prepararTasas, tasaVigente } from '@/lib/fx'
 import type { LoteKM } from '@/lib/importar-km'
 import { leerArchivo, type TipoImport } from '@/lib/plantillas'
-import { ROLES_LISTA } from '@/lib/permisos'
+import { esAdminEconomica, revisaArqueos, revisaConteos, ROLES_LISTA } from '@/lib/permisos'
 import { borrarSubida, leerSubida, mutar } from '@/lib/store'
 import type { Arqueo, Asiento, Categoria, Conteo, LineaConteo, CategoriaPago, Compra, Dataset, Deuda, EnvioAxis, LineaER, Moneda, Movimiento, Producto, Rol, Salida, Settings, Tasa, Tienda, Usuario } from '@/lib/types'
 
@@ -387,7 +389,7 @@ export async function accionTasa(_prev: Resultado | null, form: FormData): Promi
 export async function accionSettings(_prev: Resultado | null, form: FormData): Promise<Resultado> {
   try {
     const s = await autorizar('catalogos')
-    if (s.rol !== 'propietario' && s.rol !== 'admin') throw new Error('Solo administración.')
+    if (!esAdminEconomica(s.rol)) throw new Error('Solo administración.')
     const pct = (k: string) => (numero(form, k)! > 1 ? numero(form, k)! / 100 : numero(form, k)!)
     const cambios: Partial<Settings> = {
       empresa: str(form, 'empresa') || DEFAULT_SETTINGS.empresa,
@@ -431,7 +433,7 @@ export async function accionDistribucion(_prev: Resultado | null, form: FormData
 export async function accionCerrarMes(_prev: Resultado | null, form: FormData): Promise<Resultado> {
   try {
     const s = await autorizar('contabilidad')
-    if (s.rol !== 'propietario' && s.rol !== 'admin') throw new Error('Solo administración puede cerrar o abrir meses.')
+    if (!esAdminEconomica(s.rol)) throw new Error('Solo administración puede cerrar o abrir meses.')
     const mes = str(form, 'mes')
     const abrir = str(form, 'abrir') === '1'
     if (abrir && s.rol !== 'propietario') throw new Error('Solo el propietario puede reabrir un mes.')
@@ -545,10 +547,72 @@ export async function accionProducto(_prev: Resultado | null, form: FormData): P
   }
 }
 
+/** Aplica casamientos «producto del Excel → mercancía del TPV»: renombra ventas y compras y deja un solo producto. */
+async function casarProductos(pares: { excel: string; tpv: string }[], usuario: string) {
+  if (!pares.length) throw new Error('No hay nada que casar.')
+  const mapa = new Map(pares.map((p) => [p.excel, p.tpv]))
+  let renombrados = 0
+  await mutar({ productos: [] as Producto[], salidas: [] as Salida[], compras: [] as Compra[] }, (a) => {
+    const porNombre = new Map(a.productos.map((p) => [p.nombre, p]))
+    for (const { excel, tpv } of pares) {
+      if (!porNombre.has(excel)) throw new Error(`«${excel}» ya no está en el catálogo.`)
+      if (!esDelTPV(porNombre.get(tpv) ?? { codigo: '', nombre: '' })) throw new Error(`«${tpv}» no es una mercancía del TPV.`)
+    }
+    const ren = <T extends { producto?: string }>(x: T): T => {
+      const n = x.producto ? mapa.get(x.producto) : undefined
+      if (!n) return x
+      renombrados++
+      return { ...x, producto: n }
+    }
+    // El producto del TPV hereda lo que solo tenía el del Excel (existencia de referencia, costo).
+    const productos = a.productos
+      .filter((p) => !mapa.has(p.nombre))
+      .map((p) => {
+        const de = pares.filter((x) => x.tpv === p.nombre).map((x) => porNombre.get(x.excel)!)
+        if (!de.length) return p
+        const ref = de.reduce((s, x) => s + (x.existenciaRef ?? 0), 0)
+        return { ...p, ...(p.existenciaRef == null && de.some((x) => x.existenciaRef != null) ? { existenciaRef: ref } : {}), ...(p.costoUSD == null && de[0].costoUSD != null ? { costoUSD: de[0].costoUSD } : {}) }
+      })
+    return { productos, salidas: a.salidas.map(ren), compras: a.compras.map(ren) }
+  })
+  await registrarAuditoria([{ usuario, accion: 'casar productos', coleccion: 'productos', detalle: `${pares.length} productos, ${renombrados} registros: ${pares.slice(0, 20).map((p) => `${p.excel} → ${p.tpv}`).join('; ')}` }])
+  return renombrados
+}
+
+/** Casa los productos elegidos en la lista (cada fila: producto del Excel y la mercancía del TPV elegida). */
+export async function accionCasar(_prev: Resultado | null, form: FormData): Promise<Resultado> {
+  try {
+    const s = await autorizar('catalogos')
+    const pares: { excel: string; tpv: string }[] = []
+    for (const [k, v] of form.entries()) if (k.startsWith('m_') && String(v)) pares.push({ excel: str(form, `e_${k.slice(2)}`), tpv: String(v) })
+    const n = await casarProductos(pares, s.email)
+    refrescar()
+    return { ok: true, mensaje: `${pares.length} productos casados; ${n} ventas y compras pasan al producto del TPV.` }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+/** Casa de una vez los que coinciden con seguridad (mismo nombre salvo tildes, signos u orden de palabras). */
+export async function accionCasarSeguros(_prev: Resultado | null, _form: FormData): Promise<Resultado> {
+  try {
+    const s = await autorizar('catalogos')
+    const ds = await cargarDataset()
+    const pares = propuestasCasar(ds.productos, new Map())
+      .filter((p) => p.seguro)
+      .map((p) => ({ excel: p.nombre, tpv: p.candidatos[0].nombre }))
+    const n = await casarProductos(pares, s.email)
+    refrescar()
+    return { ok: true, mensaje: `${pares.length} productos casados automáticamente; ${n} ventas y compras actualizadas.` }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
 export async function accionUsuario(_prev: Resultado | null, form: FormData): Promise<Resultado> {
   try {
     const s = await autorizar('catalogos')
-    if (s.rol !== 'propietario' && s.rol !== 'admin') throw new Error('Solo administración gestiona usuarios.')
+    if (!esAdminEconomica(s.rol)) throw new Error('Solo administración gestiona usuarios.')
     const email = str(form, 'email').toLowerCase()
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error('Correo no válido.')
     const rol = str(form, 'rol') as Rol
@@ -699,7 +763,7 @@ export async function accionImportar(_prev: Resultado | null, form: FormData): P
 export async function accionDeshacerImportacion(_prev: Resultado | null, form: FormData): Promise<Resultado> {
   try {
     const s = await autorizar('importar')
-    if (s.rol !== 'propietario' && s.rol !== 'admin') throw new Error('Solo administración puede deshacer importaciones.')
+    if (!esAdminEconomica(s.rol)) throw new Error('Solo administración puede deshacer importaciones.')
     const lote = str(form, 'lote')
     await mutar({ movimientos: [] as Movimiento[], salidas: [] as Salida[], compras: [] as Compra[], importaciones: [] as Dataset['importaciones'] }, (a) => ({
       movimientos: a.movimientos.filter((x) => x.lote !== lote),
@@ -846,49 +910,230 @@ export async function accionConteoCerrar(_prev: Resultado | null, form: FormData
 }
 
 /**
- * Arqueo de la caja de un mercado. El esperado sale de la caja en Kaluch tras traer lo último
- * de esa tienda desde el TPV (solo lectura). Devuelve el id para abrir el comprobante.
+ * El contador aprueba el ajuste de un conteo cerrado: queda pendiente de pasar al TPV como operación 4
+ * en el área elegida (Sincronización → Ajustes). No se toca la contabilidad: el ajuste vuelve del TPV.
  */
-export async function accionArqueo(_prev: Resultado | null, form: FormData): Promise<Resultado & { id?: string }> {
+export async function accionConteoAprobarAjuste(_prev: Resultado | null, form: FormData): Promise<Resultado> {
   try {
-    const ds0 = await cargarDataset()
-    const s = await autorizar('arqueo', str(form, 'tienda'))
-    const tienda = tiendaDe(s, form, ds0)
-    const detalle: Arqueo['detalle'] = []
-    const otros: Arqueo['otros'] = {}
-    for (const [mon, valores] of Object.entries(DENOMINACIONES) as [Moneda, number[]][]) {
-      for (const v of valores) {
-        const n = numero(form, `${mon}_${v}`, false)
-        if (n != null && n !== 0) {
-          if (!(n > 0) || !Number.isInteger(n)) throw new Error(`Cantidad de billetes de ${v} ${mon} no válida.`)
-          detalle.push({ moneda: mon, valor: v, cantidad: n })
-        }
-      }
-      const o = numero(form, `${mon}_otros`, false)
-      if (o) otros[mon] = o
-    }
-    const contado = totalArqueo(detalle, otros)
-    // Lo último del TPV de esta tienda, para que el esperado incluya los cobros de hoy.
-    let avisoEsperado: string | undefined
-    if (ds0.settings.axispos?.url)
-      try {
-        await sincronizarAxis({ modo: 'novedades', usuario: `${s.email} (arqueo)`, mesesCerradosEditables: false, tiendas: [tienda] })
-      } catch (e) {
-        avisoEsperado = `No se pudo leer el TPV; el esperado llega hasta la última sincronización (${e instanceof Error ? e.message : String(e)}).`
-      }
     const ds = await cargarDataset()
-    const ahora = new Date()
-    const fechaHoy = ahora.toISOString().slice(0, 10)
-    const esperado = cuadreCaja(ds.movimientos, tienda, fechaHoy, fechaHoy).saldoFinal as Arqueo['esperado']
-    const id = uid()
-    let numeroArqueo = 0
-    await mutar({ arqueos: [] as Arqueo[] }, ({ arqueos }) => {
-      numeroArqueo = arqueos.reduce((m, a) => Math.max(m, a.numero), 0) + 1
-      return { arqueos: [{ id, numero: numeroArqueo, tienda, fecha: fechaHoy, ts: ahora.toISOString(), usuario: s.email, nombreUsuario: s.nombre, cajero: str(form, 'cajero') || undefined, detalle, otros, contado, esperado, avisoEsperado, nota: str(form, 'nota') || undefined }, ...arqueos] }
-    })
-    await registrarAuditoria([{ usuario: s.email, accion: 'arqueo', coleccion: 'arqueos', ref: `#${numeroArqueo}`, detalle: JSON.stringify(contado) }])
+    const c = ds.conteos.find((x) => x.id === str(form, 'id'))
+    if (!c) throw new Error('El conteo ya no existe.')
+    const s = await autorizar('conteo', c.tienda)
+    if (!revisaConteos(s.rol)) throw new Error('Solo el contador o administración aprueban ajustes.')
+    if (c.estado !== 'cerrado' || !c.resultado) throw new Error('El conteo no está cerrado o no se pudo comparar con el TPV.')
+    if (c.ajuste) throw new Error('El ajuste ya estaba aprobado.')
+    const area = str(form, 'area')
+    if (!(ds.tiendas.find((t) => t.id === c.tienda)?.codigoTPV ?? '').split(',').map((x) => x.trim()).includes(area)) throw new Error('Elige un área de la tienda.')
+    const ajuste = { area, aprobadoPor: s.nombre ?? s.email, aprobadoEn: new Date().toISOString() }
+    await mutar({ conteos: [] as Conteo[] }, ({ conteos }) => ({ conteos: conteos.map((x) => (x.id === c.id ? { ...x, ajuste } : x)) }))
+    await registrarAuditoria([{ usuario: s.email, accion: 'aprobar ajuste de conteo', coleccion: 'conteos', ref: `#${c.numero}`, detalle: `área ${area}, ${c.resultado.filter((r) => r.diferencia).length} productos` }])
     refrescar()
-    return { ok: true, mensaje: `Arqueo #${numeroArqueo} guardado.`, id }
+    return { ok: true, mensaje: escrituraAxis() ? 'Ajuste aprobado.' : 'Ajuste aprobado. Queda pendiente de pasar al TPV (modo ensayo): mientras tanto, hazlo en AxisPOS y llegará solo en la sincronización.' }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+// ---------------------------------------------------------------- cuadre de cambio de turno
+
+/** Cajas (áreas del TPV que cobran) de una tienda: sus pisos de venta o, si no se sabe, todas sus áreas. */
+function cajasDe(ds: Dataset, tienda: string) {
+  const ubic = new Map((ds.settings.axispos?.ubicaciones ?? []).map((u) => [u.code, u]))
+  const areas = (ds.tiendas.find((t) => t.id === tienda)?.codigoTPV ?? '').split(',').map((c) => c.trim()).filter(Boolean)
+  const pisos = areas.filter((c) => ubic.get(c)?.tipo === 7)
+  return (pisos.length ? pisos : areas).map((c) => ({ code: c, nombre: ubic.get(c)?.nombre ?? `Área ${c}` }))
+}
+
+const HORA = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/
+const conSegundos = (h: string) => (h.length === 16 ? `${h}:00` : h)
+
+/** Ventas de una caja en el TPV entre dos horas locales (solo lectura). */
+async function turnoTPV(ds: Dataset, caja: string, desde: string, hasta: string) {
+  const r = await clienteAxis(ds).exportarOperaciones(caja, { desde: desde.slice(0, 10), hasta: hasta.slice(0, 10), operTypes: [2, 34] })
+  const usuarios = new Map((ds.settings.axispos?.usuariosTPV ?? []).map((u) => [u.code, u.nombre]))
+  return resumenTurno(r.operaciones, desde, hasta, usuarios)
+}
+
+export type ResultadoTurno = Resultado & { turno?: { tienda: string; caja: string; desde: string; hasta: string; resumen: ResumenTurno; salario: number; tasaUSD: number; tasaEUR: number } }
+
+/** Paso 1 del cuadre: trae del TPV las ventas de la caja desde el cuadre anterior hasta ahora. */
+export async function accionTurnoPreparar(_prev: ResultadoTurno | null, form: FormData): Promise<ResultadoTurno> {
+  try {
+    const ds = await cargarDataset()
+    const s = await autorizar('arqueo', str(form, 'tienda'))
+    const tienda = tiendaDe(s, form, ds)
+    const caja = str(form, 'caja')
+    if (!cajasDe(ds, tienda).some((c) => c.code === caja)) throw new Error('Elige la caja.')
+    const anterior = ds.arqueos.filter((a) => a.caja === caja).sort((x, y) => y.hasta.localeCompare(x.hasta))[0]
+    const desde = anterior?.hasta ?? (HORA.test(str(form, 'desde')) ? conSegundos(str(form, 'desde')) : '')
+    if (!desde) throw new Error('Es el primer cuadre de esta caja: indica a qué hora empezó el turno.')
+    const hasta = horaCuba()
+    if (hasta <= desde) throw new Error('El turno no puede terminar antes de empezar.')
+    const resumen = await turnoTPV(ds, caja, desde, hasta)
+    const t = tasaVigente(prepararTasas(ds.tasas, ds.settings.margenTasa), hasta.slice(0, 10))
+    return {
+      ok: true,
+      turno: {
+        tienda,
+        caja,
+        desde,
+        hasta,
+        resumen,
+        salario: salarioSugerido(resumen.venta, ds.settings.pctSalarioCajero ?? 0.03),
+        tasaUSD: resumen.tasas.USD ?? (t ? (t.kmVenta ?? t.cupUsd + ds.settings.margenTasa) : 0),
+        tasaEUR: resumen.tasas.EUR ?? (t?.cupEur ? t.cupEur + ds.settings.margenTasa : 0),
+      },
+    }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+const listaForm = (form: FormData, a: string, b: string) => {
+  const xs = form.getAll(a).map(String)
+  const ys = form.getAll(b).map((v) => Number(String(v).replace(/\s/g, '').replace(',', '.')))
+  return xs.map((x, i) => ({ x: x.trim(), n: ys[i] })).filter((r) => r.x && Number.isFinite(r.n) && r.n !== 0)
+}
+
+/** Paso 2: guarda el cuadre de turno (queda pendiente de que lo revise el contador). Devuelve el id del comprobante. */
+export async function accionArqueo(_prev: (Resultado & { id?: string }) | null, form: FormData): Promise<Resultado & { id?: string }> {
+  try {
+    const ds = await cargarDataset()
+    const s = await autorizar('arqueo', str(form, 'tienda'))
+    const tienda = tiendaDe(s, form, ds)
+    const caja = str(form, 'caja')
+    const cajaInfo = cajasDe(ds, tienda).find((c) => c.code === caja)
+    if (!cajaInfo) throw new Error('Elige la caja.')
+    const desde = str(form, 'desde')
+    const hasta = str(form, 'hasta')
+    if (!HORA.test(desde) || !HORA.test(hasta) || hasta <= desde) throw new Error('Turno no válido: vuelve a traer las ventas.')
+    const anterior = ds.arqueos.filter((a) => a.caja === caja).sort((x, y) => y.hasta.localeCompare(x.hasta))[0]
+    if (anterior && desde < anterior.hasta) throw new Error(`Ya hay un cuadre de esta caja hasta ${anterior.hasta.replace('T', ' ')}: vuelve a traer las ventas.`)
+    const n = (k: string) => numero(form, k, false) ?? 0
+    // La venta en tienda se vuelve a leer del TPV con el mismo turno: no se fía de lo que llegue del navegador.
+    let avisoTPV: string | undefined
+    let tpv: Arqueo['tpv'] = { tickets: 0, venta: 0, efectivo: 0, noEfectivo: {}, efectivoPorMoneda: {}, porCajero: {} }
+    try {
+      const r = await turnoTPV(ds, caja, desde, hasta)
+      tpv = { tickets: r.tickets, venta: r.venta, efectivo: r.efectivo, noEfectivo: r.noEfectivo, efectivoPorMoneda: r.efectivoPorMoneda, porCajero: r.porCajero }
+    } catch (e) {
+      avisoTPV = `No se pudo leer el TPV; la venta en tienda es la que se escribió a mano (${e instanceof Error ? e.message : String(e)}).`
+    }
+    const datos = {
+      ventaTienda: avisoTPV ? n('ventaTienda') : tpv.venta,
+      domicilio: n('domicilio'),
+      plataforma: n('plataforma'),
+      gastos: listaForm(form, 'gasto_concepto', 'gasto_importe').map((r, i) => ({ concepto: r.x, importe: r.n, categoria: String(form.getAll('gasto_categoria')[i] ?? '') || undefined })),
+      salario: n('salario'),
+      transferencias: listaForm(form, 'transf_cuenta', 'transf_importe').map((r) => ({ cuenta: r.x.toUpperCase(), importe: r.n })),
+      porCobrar: n('porCobrar'),
+      billetes: BILLETES_CUP.map((v) => ({ valor: v, cantidad: n(`b_${v}`) })).filter((b) => b.cantidad),
+      sueltosCUP: n('sueltosCUP'),
+      usd: n('usd'),
+      tasaUSD: n('tasaUSD'),
+      eur: n('eur'),
+      tasaEUR: n('tasaEUR'),
+      otros: n('otros'),
+    }
+    if (datos.billetes.some((b) => b.cantidad < 0 || !Number.isInteger(b.cantidad))) throw new Error('Las cantidades de billetes tienen que ser números enteros.')
+    if ((datos.usd && !datos.tasaUSD) || (datos.eur && !datos.tasaEUR)) throw new Error('Falta la tasa del USD o del EUR.')
+    const c = calcularCuadre(datos)
+    const id = uid()
+    const ahora = new Date().toISOString()
+    let num = 0
+    await mutar({ arqueos: [] as Arqueo[] }, ({ arqueos }) => {
+      const ultimo = arqueos.filter((a) => a.caja === caja).sort((x, y) => y.hasta.localeCompare(x.hasta))[0]
+      if (ultimo && desde < ultimo.hasta) throw new Error('Otra persona cuadró esta caja mientras tanto: vuelve a traer las ventas.')
+      num = arqueos.reduce((m, a) => Math.max(m, a.numero), 0) + 1
+      const a: Arqueo = {
+        id,
+        numero: num,
+        tienda,
+        caja,
+        cajaNombre: cajaInfo.nombre,
+        desde,
+        hasta,
+        fecha: hasta.slice(0, 10),
+        ts: ahora,
+        usuario: s.email,
+        nombreUsuario: s.nombre,
+        cajero: str(form, 'cajero') || undefined,
+        trabajadores: Math.max(1, Math.round(n('trabajadores')) || 1),
+        tpv,
+        ...datos,
+        esperado: c.esperado,
+        contado: c.contado,
+        diferencia: c.diferencia,
+        fondo: n('fondo'),
+        avisoTPV,
+        observaciones: str(form, 'observaciones') || undefined,
+        estado: 'pendiente',
+      }
+      return { arqueos: [a, ...arqueos] }
+    })
+    await registrarAuditoria([{ usuario: s.email, accion: 'cuadre de turno', coleccion: 'arqueos', ref: `#${num}`, detalle: `${cajaInfo.nombre} ${desde}→${hasta}: esperado ${c.esperado}, contado ${c.contado}, diferencia ${c.diferencia}` }])
+    refrescar()
+    return { ok: true, mensaje: `Cuadre #${num} guardado.`, id }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+/**
+ * El contador revisa y aprueba el cuadre: se registran en la caja de la tienda los gastos y el salario pagados
+ * en el turno y, si se marca, la entrega del efectivo (menos el fondo) a la caja central.
+ */
+export async function accionArqueoAprobar(_prev: Resultado | null, form: FormData): Promise<Resultado> {
+  try {
+    const ds = await cargarDataset()
+    const a = ds.arqueos.find((x) => x.id === str(form, 'id'))
+    if (!a) throw new Error('El cuadre ya no existe.')
+    const s = await autorizar('arqueo', a.tienda)
+    if (!revisaArqueos(s.rol)) throw new Error('Solo el contador o administración aprueban cuadres.')
+    if (a.estado === 'aprobado') throw new Error('Ya estaba aprobado.')
+    comprobarMes(s, ds.settings, a.fecha)
+    const t = ds.tiendas.find((x) => x.id === a.tienda)!
+    const matriz = ds.tiendas.find((x) => x.tipo === 'matriz')
+    const base = { libro: 'caja' as const, fecha: a.fecha, tienda: a.tienda, moneda: 'CUP' as const, tipo: 'Salida' as const, origen: 'manual' as const, comprobante: `CT-${a.numero}`, cajero: a.cajero }
+    const movs: Movimiento[] = [
+      ...a.gastos.map((g) => ({ ...base, id: uid(), categoria: g.categoria || 'OTROS GASTOS', concepto: `${g.concepto} · cuadre #${a.numero}`, monto: g.importe })),
+      ...(a.salario ? [{ ...base, id: uid(), categoria: 'SALARIO DEPENDIENTE', concepto: `Salario ${a.cajero ?? ''} (${a.trabajadores}) · cuadre #${a.numero}`.replace('  ', ' '), monto: a.salario }] : []),
+    ]
+    if (form.get('entregar') === 'on') {
+      if (!matriz) throw new Error('No hay Casa Matriz para recibir la entrega.')
+      const cup = Math.round((a.billetes.reduce((x, b) => x + b.valor * b.cantidad, 0) + a.sueltosCUP + a.otros - a.fondo) * 100) / 100
+      for (const [moneda, monto] of [['CUP', cup], ['USD', a.usd], ['EUR', a.eur]] as [Moneda, number][])
+        if (monto > 0) movs.push(...movimientosEntrega({ id: uid(), fecha: a.fecha, tienda: a.tienda, nombreTienda: t.nombre, matriz: matriz.id, moneda, monto, cajero: a.cajero, nota: `Cuadre #${a.numero}` }))
+    }
+    await mutar({ movimientos: [] as Movimiento[], arqueos: [] as Arqueo[] }, (x) => {
+      if (x.arqueos.find((y) => y.id === a.id)?.estado === 'aprobado') throw new Error('Ya estaba aprobado.')
+      return {
+        movimientos: [...x.movimientos, ...movs],
+        arqueos: x.arqueos.map((y) => (y.id === a.id ? { ...y, estado: 'aprobado' as const, revisadoPor: s.nombre ?? s.email, revisadoEn: new Date().toISOString(), movimientos: movs.map((m) => m.id) } : y)),
+      }
+    })
+    await registrarAuditoria([{ usuario: s.email, accion: 'aprobar cuadre', coleccion: 'arqueos', ref: `#${a.numero}`, detalle: `${movs.length} movimientos de caja` }])
+    refrescar()
+    return { ok: true, mensaje: `Cuadre #${a.numero} aprobado: ${movs.length} movimientos registrados en la caja de ${t.nombre}.` }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+/** Borra un cuadre pendiente (mal hecho): la caja vuelve a cuadrarse desde el anterior. Solo el último de su caja. */
+export async function accionArqueoBorrar(_prev: Resultado | null, form: FormData): Promise<Resultado> {
+  try {
+    const ds = await cargarDataset()
+    const a = ds.arqueos.find((x) => x.id === str(form, 'id'))
+    if (!a) throw new Error('El cuadre ya no existe.')
+    const s = await autorizar('arqueo', a.tienda)
+    if (!revisaArqueos(s.rol)) throw new Error('Solo el contador o administración borran cuadres.')
+    if (a.estado !== 'pendiente') throw new Error('Un cuadre aprobado no se borra.')
+    if (ds.arqueos.some((x) => x.caja === a.caja && x.hasta > a.hasta)) throw new Error('Solo se puede borrar el último cuadre de la caja.')
+    await mutar({ arqueos: [] as Arqueo[] }, ({ arqueos }) => ({ arqueos: arqueos.filter((x) => x.id !== a.id) }))
+    await registrarAuditoria([{ usuario: s.email, accion: 'borrar cuadre', coleccion: 'arqueos', ref: `#${a.numero}`, detalle: JSON.stringify({ esperado: a.esperado, contado: a.contado }) }])
+    refrescar()
+    return { ok: true, mensaje: `Cuadre #${a.numero} borrado.` }
   } catch (e) {
     return fallo(e)
   }
@@ -1001,7 +1246,7 @@ export async function accionAxisProbar(_prev?: Resultado | null, _f?: FormData):
     await mutar({ settings: DEFAULT_SETTINGS, tiendas: DEFECTOS.tiendas }, ({ settings, tiendas }) => {
       const prop = proponerAreas(ubic, tiendas)
       return {
-        settings: { ...DEFAULT_SETTINGS, ...settings, axispos: { ...settings.axispos!, ubicaciones: ubic, proveedores, ...(settings.axispos?.usuarioCodigo || !usuarioCodigo ? {} : { usuarioCodigo: String(usuarioCodigo) }) } },
+        settings: { ...DEFAULT_SETTINGS, ...settings, axispos: { ...settings.axispos!, ubicaciones: ubic, proveedores, usuariosTPV: usuarios.map((u) => ({ code: String(u.Code), nombre: u.Name })), ...(settings.axispos?.usuarioCodigo || !usuarioCodigo ? {} : { usuarioCodigo: String(usuarioCodigo) }) } },
         tiendas: [...tiendas, ...DEFECTOS.tiendas.filter((d) => !tiendas.some((t) => t.id === d.id))].map((t) => {
           const codigos = t.tipo === 'almacen' ? [AREA_CENTRAL] : prop.get(t.id)
           if (t.codigoTPV || !codigos) return t

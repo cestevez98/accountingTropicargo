@@ -1,6 +1,6 @@
 import { prepararTasas, tasaTiendaVenta, tasaVigente, type TablaTasas } from './fx'
 import type { OperacionTPV } from './axispos'
-import type { Compra, Dataset, EnvioAxis, Producto, Salida, Tienda } from './types'
+import type { Compra, Conteo, Dataset, EnvioAxis, Producto, Salida, Tienda } from './types'
 
 /**
  * Lo que este sistema sube a AxisPOS: la tasa de la tienda y las compras del Almacén Central con
@@ -151,4 +151,30 @@ export function prepararEnvioCompra(ds: Pick<Dataset, 'compras' | 'salidas' | 't
     )
   }
   return { compra, docs, siguiente: n }
+}
+
+/**
+ * Ajuste de inventario de un conteo aprobado (operación 4): una línea por producto con diferencia;
+ * cantidad positiva = sobrante, negativa = faltante (como las trae el TPV). El costo va en CUP.
+ */
+export function operacionAjuste(c: Conteo, acct: number, area: string, usuario: string, productos: Producto[], cupUsd: number): OperacionTPV {
+  const costo = new Map(productos.map((p) => [p.codigo, p]))
+  const lineas = (c.resultado ?? []).filter((r) => r.diferencia && !r.codigo.startsWith('?'))
+  if (!lineas.length) throw new Error('El conteo no tiene diferencias que ajustar.')
+  const fecha = (c.cierre ?? c.inicio).slice(0, 10)
+  return {
+    Acct: acct,
+    Date: fecha,
+    DateIssued: `${fecha}T12:00:00`,
+    OperType: 4,
+    ObjectCode: area,
+    UserCode: usuario,
+    Note: notaKA(c.id),
+    Items: lineas.map((r) => {
+      const p = costo.get(r.codigo)
+      const priceIn = Math.round((p?.costoCUP ?? (p?.costoUSD ?? r.costoUSD ?? 0) * cupUsd) * 1000) / 1000
+      return { ItemCode: r.codigo, ItemName: r.nombre, Qtty: r.diferencia, Discount: 0, Price: p?.precioCUP ?? priceIn, PriceIn: priceIn, AmountTotal: Math.round(r.diferencia * priceIn * 100) / 100 }
+    }),
+    Payments: [],
+  }
 }

@@ -2,10 +2,10 @@ import { Chip, Encabezado, Paginador, Pestanas, url, Vacio } from '@/components/
 import { requerirUsuario } from '@/lib/auth'
 import { clienteAxis } from '@/lib/axis-servidor'
 import { escrituraAxis, type OperacionTPV } from '@/lib/axispos'
-import { monedasConTasa, prepararEnvioCompra } from '@/lib/axispos-envio'
+import { monedasConTasa, operacionAjuste, prepararEnvioCompra, SERIE_INICIAL } from '@/lib/axispos-envio'
 import { cargarDataset } from '@/lib/data'
 import { hoy } from '@/lib/fecha'
-import { prepararTasas } from '@/lib/fx'
+import { prepararTasas, tasaVigente } from '@/lib/fx'
 import { inventarioDerivado } from '@/lib/inventario'
 import { params, type SP } from '@/lib/pagina'
 import { compararCatalogo, cuadreExistencias, itemParaTPV } from '@/lib/sincro'
@@ -18,6 +18,7 @@ const TABS = [
   { clave: 'tasa', label: 'Tasa' },
   { clave: 'compras', label: 'Compras al central' },
   { clave: 'existencias', label: 'Existencias' },
+  { clave: 'ajustes', label: 'Ajustes de conteo' },
 ]
 
 /**
@@ -35,6 +36,7 @@ export default async function Sincronizacion({ searchParams }: { searchParams: S
     else if (tab === 'catalogo') cuerpo = await Catalogo({ ds, sp })
     else if (tab === 'tasa') cuerpo = await Tasa({ ds, sp })
     else if (tab === 'compras') cuerpo = <Compras ds={ds} sp={sp} />
+    else if (tab === 'ajustes') cuerpo = <Ajustes ds={ds} />
     else cuerpo = await Existencias({ ds, sp })
   } catch (e) {
     cuerpo = <div className="tarjeta border-l-4 border-l-danger p-4 text-sm">No se pudo leer el TPV: {e instanceof Error ? e.message : String(e)}</div>
@@ -392,6 +394,61 @@ async function Existencias({ ds, sp }: { ds: Dataset; sp: Record<string, string 
         </table>
         <Paginador pagina={pagina} total={vista.length} porPagina={100} base={(p) => url('/sincronizacion', sp, { p })} />
       </div>
+    </>
+  )
+}
+
+function Ajustes({ ds }: { ds: Dataset }) {
+  const pendientes = ds.conteos.filter((c) => c.ajuste && !c.ajuste.axis?.enviada)
+  const nombreT = new Map(ds.tiendas.map((t) => [t.id, t.nombre]))
+  const area = new Map((ds.settings.axispos?.ubicaciones ?? []).map((u) => [u.code, u.nombre]))
+  const t = tasaVigente(prepararTasas(ds.tasas, ds.settings.margenTasa), hoy())
+  if (!pendientes.length) return <Vacio>No hay ajustes de conteo aprobados pendientes de pasar al TPV.</Vacio>
+  let acct = ds.settings.axispos?.siguienteAcct ?? SERIE_INICIAL
+  return (
+    <>
+      {pendientes.map((c) => {
+        let op: OperacionTPV | undefined
+        let error: string | undefined
+        try {
+          op = operacionAjuste(c, acct++, c.ajuste!.area, ds.settings.axispos?.usuarioCodigo ?? '', ds.productos, t?.cupUsd ?? 0)
+        } catch (e) {
+          error = e instanceof Error ? e.message : String(e)
+        }
+        return (
+          <div key={c.id} className="tarjeta mb-3 overflow-x-auto">
+            <h2 className="px-4 pt-3 text-sm font-semibold">
+              Conteo #{c.numero} · {nombreT.get(c.tienda)} · {area.get(c.ajuste!.area) ?? c.ajuste!.area} · aprobado por {c.ajuste!.aprobadoPor} — Inventario (4) {op && `#${op.Acct}`}
+            </h2>
+            {error ? (
+              <p className="px-4 pb-3 text-sm text-danger">{error}</p>
+            ) : (
+              <table className="tabla">
+                <thead>
+                  <tr>
+                    <th>Código</th>
+                    <th>Mercancía</th>
+                    <th className="num">Cantidad</th>
+                    <th className="num">Costo CUP</th>
+                    <th className="num">Importe</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {op!.Items!.map((it) => (
+                    <tr key={it.ItemCode}>
+                      <td className="text-xs text-muted-foreground">{it.ItemCode}</td>
+                      <td>{it.ItemName}</td>
+                      <td className={`num ${(it.Qtty ?? 0) < 0 ? 'text-danger' : ''}`}>{f2(it.Qtty)}</td>
+                      <td className="num">{f2(it.PriceIn)}</td>
+                      <td className="num">{f2(it.AmountTotal)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )
+      })}
     </>
   )
 }

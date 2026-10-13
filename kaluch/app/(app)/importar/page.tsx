@@ -5,6 +5,7 @@ import { requerirUsuario, tiendaFija } from '@/lib/auth'
 import { cargarDataset } from '@/lib/data'
 import { PLANTILLAS } from '@/lib/plantillas'
 import { Importador } from './Importador'
+import { esAdminEconomica } from '@/lib/permisos'
 
 export const maxDuration = 300
 
@@ -15,7 +16,7 @@ export default async function Importar() {
     { clave: 'km', titulo: 'Libro completo de la tienda (Excel KM)', descripcion: 'El libro «Operaciones KM-xx»: tasas, caja, banco, ventas, compras, deuda con Casa Matriz e inventario.', plantilla: false },
     ...Object.entries(PLANTILLAS).map(([clave, p]) => ({ clave, titulo: p.titulo, descripcion: p.descripcion, plantilla: true })),
   ]
-  const admin = s.rol === 'propietario' || s.rol === 'admin'
+  const admin = esAdminEconomica(s.rol)
   return (
     <>
       <Encabezado titulo="Importar" descripcion="Sube los archivos de cada tienda: el sistema valida cada fila, te enseña los errores antes de guardar y genera los estados financieros solo." />

@@ -125,6 +125,8 @@ export const DEFAULT_SETTINGS: Settings = {
   impuestoVentas: 0.11,
   revaluar: true,
   margenMinimo: 0.3,
+  pctSalarioCajero: 0.03,
+  cuentasTransferencia: ['FISCAL', 'CARLOS', 'ROLY'],
   pctReinversionDefecto: 0.05,
   pctInversionistaDefecto: 0.15,
   mesesCerrados: [],

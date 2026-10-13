@@ -262,29 +262,60 @@ export interface Conteo {
   resultado?: { codigo: string; nombre: string; contado: number; sistema: number; diferencia: number; costoUSD?: number }[]
   /** Si no se pudo leer el TPV al cerrar. */
   errorSistema?: string
+  /** Ajuste aprobado por el contador: queda pendiente de pasar al TPV (operación 4) en el área elegida. */
+  ajuste?: { area: string; aprobadoPor: string; aprobadoEn: string; axis?: EnvioAxis }
   nota?: string
 }
 
-/** Arqueo de caja: efectivo contado por denominaciones contra lo que debería haber. */
+/**
+ * Cuadre de cambio de turno de una caja (modelo «Cuadre diario» de las tiendas).
+ * La venta del turno sale del TPV (tickets de esa caja desde el cuadre anterior); el resto lo pone quien cuadra.
+ */
 export interface Arqueo {
   id: string
   numero: number
   tienda: string
+  /** Área del TPV que cobra (la caja) y su nombre. */
+  caja: string
+  cajaNombre?: string
+  /** Turno en hora local de Cuba (AAAA-MM-DDTHH:mm:ss): desde el cuadre anterior hasta este. */
+  desde: string
+  hasta: string
   fecha: string
   ts: string
   usuario: string
   nombreUsuario?: string
   cajero?: string
-  /** Billetes y monedas contados. */
-  detalle: { moneda: Moneda; valor: number; cantidad: number }[]
-  /** Sueltos u otros importes por moneda (monedas fraccionarias, vales…). */
-  otros?: Partial<Record<Moneda, number>>
-  contado: Partial<Record<Moneda, number>>
-  /** Saldo de la caja según Kaluch (cobros del TPV − gastos − entregas) al momento del arqueo. */
-  esperado: Partial<Record<Moneda, number>>
-  /** Si el esperado no incluye lo último del TPV (no se pudo leer). */
-  avisoEsperado?: string
-  nota?: string
+  trabajadores: number
+  /** Lo que dice el TPV del turno (CUP). */
+  tpv: { tickets: number; venta: number; efectivo: number; noEfectivo: Record<string, number>; efectivoPorMoneda: Partial<Record<Moneda, number>>; porCajero: Record<string, number> }
+  ventaTienda: number
+  domicilio: number
+  plataforma: number
+  gastos: { concepto: string; importe: number; categoria?: string }[]
+  salario: number
+  transferencias: { cuenta: string; importe: number }[]
+  porCobrar: number
+  billetes: { valor: number; cantidad: number }[]
+  sueltosCUP: number
+  usd: number
+  tasaUSD: number
+  eur: number
+  tasaEUR: number
+  otros: number
+  /** Totales calculados al guardar (CUP). */
+  esperado: number
+  contado: number
+  diferencia: number
+  /** Efectivo que se queda en la caja como fondo para el turno siguiente (CUP). */
+  fondo: number
+  avisoTPV?: string
+  observaciones?: string
+  estado: 'pendiente' | 'aprobado'
+  revisadoPor?: string
+  revisadoEn?: string
+  /** Movimientos de caja creados al aprobar (gastos, salario, entrega a la caja central). */
+  movimientos?: string[]
 }
 
 export interface Settings {
@@ -299,6 +330,10 @@ export interface Settings {
   margenMinimo: number
   pctReinversionDefecto: number
   pctInversionistaDefecto: number
+  /** Salario del cajero en el cuadre de turno: fracción de la venta (3 %). */
+  pctSalarioCajero?: number
+  /** Cuentas que reciben transferencias en el cuadre de turno. */
+  cuentasTransferencia?: string[]
   /** Margen de la Tienda Web sobre el costo del Almacén Central (fracción). */
   margenWeb?: number
   axispos?: {
@@ -315,6 +350,8 @@ export interface Settings {
     ubicaciones?: { code: string; nombre: string; grupo?: string; tipo?: number; precioGrupo?: number }[]
     /** Proveedores del TPV (código y nombre). */
     proveedores?: { code: string; nombre: string }[]
+    /** Usuarios del TPV (cajeros), para el cuadre de turno. */
+    usuariosTPV?: { code: string; nombre: string }[]
     /** Usuario de AxisPOS con el que se firman las operaciones que se suben. */
     usuarioCodigo?: string
     /** Siguiente número de documento de la serie propia (no choca con los tickets del TPV). */

@@ -1,8 +1,8 @@
 import type { DisponibleTPV } from './sincro'
-import type { LineaConteo, Moneda, Producto } from './types'
+import type { LineaConteo, Producto } from './types'
 
 /**
- * Conteo físico a ciegas y arqueo de caja. Funciones puras (sin red) para poder probarlas.
+ * Conteo físico a ciegas. Funciones puras (sin red) para poder probarlas.
  */
 
 /** Catálogo compacto para el escáner: [código, nombre, ...códigos de barras]. */
@@ -48,20 +48,4 @@ export function resultadoConteo(lineas: LineaConteo[], disponibles: DisponibleTP
     const s = Math.round((sistema.get(l.codigo) ?? 0) * 1000) / 1000
     return { codigo: l.codigo, nombre: l.nombre, contado: l.cantidad, sistema: s, diferencia: Math.round((l.cantidad - s) * 1000) / 1000, costoUSD: costo.get(l.codigo) }
   })
-}
-
-/** Billetes por moneda (Cuba). El MLC no tiene efectivo. */
-export const DENOMINACIONES: Partial<Record<Moneda, number[]>> = {
-  CUP: [1000, 500, 200, 100, 50, 20, 10, 5, 3, 1],
-  USD: [100, 50, 20, 10, 5, 2, 1],
-  EUR: [500, 200, 100, 50, 20, 10, 5],
-}
-
-/** Total contado por moneda: billetes × denominación + sueltos. */
-export function totalArqueo(detalle: { moneda: Moneda; valor: number; cantidad: number }[], otros: Partial<Record<Moneda, number>> = {}) {
-  const t: Partial<Record<Moneda, number>> = {}
-  for (const d of detalle) if (d.cantidad) t[d.moneda] = (t[d.moneda] ?? 0) + d.valor * d.cantidad
-  for (const [m, v] of Object.entries(otros) as [Moneda, number][]) if (v) t[m] = (t[m] ?? 0) + v
-  for (const m of Object.keys(t) as Moneda[]) t[m] = Math.round(t[m]! * 100) / 100
-  return t
 }
