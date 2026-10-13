@@ -71,7 +71,7 @@ export default async function PanelPage({ searchParams }: { searchParams: SP }) 
           />
           <Kpi titulo="Tesorería al cierre" valor={fmt(tes, 0)} sub="Cajas + bancos − tarjetas" tono={tes >= 0 ? 'normal' : 'malo'} href="/bancos" />
           <Kpi titulo="Cuentas por cobrar" valor={fmt(cxc, 0)} sub="Según el libro mayor" href="/mayor?cuenta=cxc" />
-          <Kpi titulo="Cuentas por pagar" valor={fmt(cxp, 0)} sub="Proveedores" href="/mayor?cuenta=cxp" />
+          <Kpi titulo="Cuentas por pagar" valor={fmt(cxp, 0)} sub={cxp < 0 ? 'Negativo: hay pagos sin factura registrada' : 'Proveedores'} tono={cxp < 0 ? 'malo' : 'normal'} href="/mayor?cuenta=cxp" />
           <Kpi titulo="Por clasificar" valor={String(nSin)} sub="movimientos" tono={nSin ? 'malo' : 'bueno'} href="/movimientos?categoria=__sin__" />
         </div>
       )}
