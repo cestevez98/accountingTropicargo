@@ -285,16 +285,32 @@ export interface Arqueo {
   ts: string
   usuario: string
   nombreUsuario?: string
+  turno: 'dia' | 'noche'
   cajero?: string
   trabajadores: number
-  /** Lo que dice el TPV del turno (CUP). */
-  tpv: { tickets: number; venta: number; efectivo: number; noEfectivo: Record<string, number>; efectivoPorMoneda: Partial<Record<Moneda, number>>; porCajero: Record<string, number> }
+  /** Lo que dice el TPV del turno (CUP). Pax: clientes marcados con los artículos de ESTADISTICA. */
+  tpv: {
+    tickets: number
+    venta: number
+    efectivo: number
+    noEfectivo: Record<string, number>
+    efectivoPorMoneda: Partial<Record<Moneda, number>>
+    porCajero: Record<string, number>
+    pax?: Record<string, number>
+    tramos?: { desde: string; hasta: string; venta: number; tickets: number; pax: Record<string, number> }[]
+  }
+  /** Clientes que se anotan a mano (no hay artículo en el TPV). */
+  paxCompra?: number
+  paxMuseo?: number
   ventaTienda: number
   domicilio: number
   plataforma: number
   gastos: { concepto: string; importe: number; categoria?: string }[]
   salario: number
+  /** Totales por cuenta (sale de `tarjetas`). */
   transferencias: { cuenta: string; importe: number }[]
+  /** Hoja «Venta por tarjeta»: cada transferencia con su número, carnet de identidad y titular. */
+  tarjetas?: { cuenta: string; numero: string; importe: number; ci?: string; titular?: string }[]
   porCobrar: number
   billetes: { valor: number; cantidad: number }[]
   sueltosCUP: number
@@ -307,15 +323,50 @@ export interface Arqueo {
   esperado: number
   contado: number
   diferencia: number
+  /** Contado − salario − fondo: lo que va a la caja central. */
+  aEntregar?: number
   /** Efectivo que se queda en la caja como fondo para el turno siguiente (CUP). */
   fondo: number
   avisoTPV?: string
   observaciones?: string
+  /** Check list de cambio de turno: id de la tarea → hecho y observación (solo si hay problema). */
+  checklist?: Record<string, { ok: boolean; obs?: string }>
+  /** Carga del inversor y del EcoFlow (%) al entregar el turno. */
+  energia?: { inversor?: number; ecoflow?: number }
+  /** Firmas del cambio de turno: quién entrega y quién recibe por responsable. */
+  firmas?: Partial<Record<'cajero' | 'dependiente' | 'seguridad', { entrega?: string; recibe?: string }>>
+  /** Fotos (ruta en Blob): inversor, tickets del TPV, hoja firmada… */
+  fotos?: string[]
+  /** Quién lo cambió al revisarlo (el contador registra lo que trajo el dependiente). */
+  editadoPor?: string
+  editadoEn?: string
   estado: 'pendiente' | 'aprobado'
   revisadoPor?: string
   revisadoEn?: string
   /** Movimientos de caja creados al aprobar (gastos, salario, entrega a la caja central). */
   movimientos?: string[]
+}
+
+/**
+ * Cuenta de un trabajador (pagos al personal). El salario de cada turno se devenga al aprobar el cierre;
+ * los faltantes de caja o de inventario se descuentan (aunque aparezcan después); lo que se le entrega es el pago.
+ * Por pagar = devengado − descuentos − pagado.
+ */
+export interface ApunteNomina {
+  id: string
+  trabajador: string
+  tienda: string
+  fecha: string
+  tipo: 'devengo' | 'descuento' | 'pago'
+  importe: number
+  concepto: string
+  /** Cierre de turno o conteo del que sale. */
+  cierre?: string
+  conteo?: string
+  /** Movimiento de caja del pago. */
+  movimiento?: string
+  usuario: string
+  ts: string
 }
 
 export interface Settings {
@@ -334,6 +385,8 @@ export interface Settings {
   pctSalarioCajero?: number
   /** Cuentas que reciben transferencias en el cuadre de turno. */
   cuentasTransferencia?: string[]
+  /** Horas en que se parte el turno en el reporte (la noche, a las 2 a.m.). */
+  cortesTurno?: string[]
   /** Margen de la Tienda Web sobre el costo del Almacén Central (fracción). */
   margenWeb?: number
   axispos?: {
@@ -412,6 +465,7 @@ export interface Dataset {
   importaciones: Importacion[]
   conteos: Conteo[]
   arqueos: Arqueo[]
+  nomina: ApunteNomina[]
   /** Totales guardados del ER del último Excel importado por tienda (para la comparación). */
   referencias: Record<string, { meses: string[]; er: Record<string, number[]>; archivo: string }>
 }

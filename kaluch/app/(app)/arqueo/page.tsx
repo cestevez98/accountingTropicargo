@@ -5,7 +5,10 @@ import { requerirUsuario, tiendaFija } from '@/lib/auth'
 import { cargarDataset, preferencias } from '@/lib/data'
 import { params, type SP } from '@/lib/pagina'
 import { revisaArqueos } from '@/lib/permisos'
-import { FormArqueo } from './FormArqueo'
+import { inventarioRevisado } from '@/lib/nomina'
+import { CompartirWhatsApp, FormArqueo, HojaCierre, turnoDeCierre } from './FormArqueo'
+import { CHECKLIST, ITEMS_CHECKLIST, TURNO_LABEL } from '@/lib/turno'
+import type { Arqueo, Dataset } from '@/lib/types'
 
 const f2 = (n: number) => n.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 const hora = (h: string) => h.replace('T', ' ').slice(0, 16)
@@ -37,25 +40,38 @@ export default async function PaginaArqueo({ searchParams }: { searchParams: SP 
     .slice(0, 100)
   const pendientes = ds.arqueos.filter((a) => a.estado === 'pendiente' && (!fija || a.tienda === fija)).length
   const categorias = ds.categorias.filter((c) => c.activa && c.caja && c.contrapartida === 'resultado').map((c) => c.nombre)
+  const comunes = {
+    cajeros: (ds.settings.axispos?.usuariosTPV ?? []).map((u) => u.nombre),
+    cuentas: ds.settings.cuentasTransferencia ?? ['FISCAL'],
+    categorias: [...new Set(['OTROS GASTOS', 'SALARIO SEGURIDAD', 'SALARIO LIMPIEZA', 'TRANSPORTE', ...categorias])],
+    nombreTienda: Object.fromEntries(ds.tiendas.map((t) => [t.id, t.nombre])),
+  }
+  const sel = sp.id ? ds.arqueos.find((a) => a.id === sp.id && (!fija || a.tienda === fija) && (revisa || a.usuario === s.email)) : undefined
+  if (sel && sp.editar && sel.estado === 'pendiente' && (revisa || sel.usuario === s.email))
+    return (
+      <>
+        <Encabezado titulo={`Corregir cierre #${sel.numero}`} descripcion="El contador registra lo que trajo el dependiente: corrige lo que haga falta y guarda. La venta del TPV se vuelve a leer del mismo turno.">
+          <a className="btn" href={`/arqueo?id=${sel.id}`}>
+            Volver
+          </a>
+        </Encabezado>
+        <HojaCierre turno={turnoDeCierre(sel)} cajaNombre={sel.cajaNombre ?? sel.caja} inicial={sel} {...comunes} />
+      </>
+    )
+  if (sel) return <Detalle a={sel} ds={ds} revisa={revisa} puedeEditar={sel.estado === 'pendiente' && (revisa || sel.usuario === s.email)} />
   return (
     <>
       <Encabezado
-        titulo="Cuadre de turno"
-        descripcion="Al cambiar de turno se cuadra la caja: la venta sale del TPV desde el cuadre anterior; se ponen los gastos, el salario, las transferencias y los billetes. El contador lo revisa y lo aprueba."
+        titulo="Cierre de turno"
+        descripcion="Al cambiar de turno se cierra la caja: la venta y los Pax salen del TPV desde el cierre anterior; se rellenan la hoja del cuadre, la venta por tarjeta, el check list, la energía y las firmas. Al día siguiente el contador de la tienda lo revisa y lo aprueba."
       />
       {tiendas.length ? (
-        <FormArqueo
-          tiendas={tiendas}
-          tienda={fija ?? (tiendas.some((t) => t.id === pref.tienda) ? pref.tienda : undefined)}
-          cajeros={(ds.settings.axispos?.usuariosTPV ?? []).map((u) => u.nombre)}
-          cuentas={ds.settings.cuentasTransferencia ?? ['FISCAL']}
-          categorias={[...new Set(['OTROS GASTOS', 'SALARIO SEGURIDAD', 'SALARIO LIMPIEZA', 'TRANSPORTE', ...categorias])]}
-        />
+        <FormArqueo tiendas={tiendas} tienda={fija ?? (tiendas.some((t) => t.id === pref.tienda) ? pref.tienda : undefined)} {...comunes} />
       ) : (
         <Vacio>No hay tiendas con cajas del TPV asignadas.</Vacio>
       )}
       <div className="mt-6 flex flex-wrap items-center gap-3">
-        <h2 className="text-sm font-semibold">{revisa ? 'Cuadres' : 'Mis cuadres'}</h2>
+        <h2 className="text-sm font-semibold">{revisa ? 'Cierres' : 'Mis cierres'}</h2>
         {revisa && (
           <a className="text-xs text-primary hover:underline" href={verPendientes ? '/arqueo' : '/arqueo?f=pendientes'}>
             {verPendientes ? 'Ver todos' : `Solo pendientes de revisar (${pendientes})`}
@@ -96,17 +112,18 @@ export default async function PaginaArqueo({ searchParams }: { searchParams: SP 
                   <td className={`num font-semibold ${a.diferencia < -0.5 ? 'text-danger' : a.diferencia > 0.5 ? 'text-amber-600' : 'text-accent'}`}>{Math.abs(a.diferencia) < 0.5 ? 'Cuadra' : f2(a.diferencia)}</td>
                   <td>{a.estado === 'aprobado' ? <Chip tono="verde" title={`${a.revisadoPor} · ${a.revisadoEn?.slice(0, 16)}`}>Aprobado</Chip> : <Chip tono="ambar">Pendiente</Chip>}</td>
                   <td className="whitespace-nowrap text-xs">
+                    <a className="text-primary hover:underline" href={`/arqueo?id=${a.id}`}>
+                      Ver
+                    </a>
+                    {' · '}
                     <a className="text-primary hover:underline" href={`/imprimir/arqueo?id=${a.id}`}>
                       Comprobante
                     </a>
                     {revisa && a.estado === 'pendiente' && (
                       <div className="mt-1 flex items-center gap-2">
-                        <FormAccion accion={accionArqueoAprobar} boton="Aprobar" claseBoton="btn btn-exito px-2 py-0.5 text-xs" confirmar={`¿Aprobar el cuadre #${a.numero}? Se registran sus gastos y salario en la caja.`} limpiar={false}>
-                          <input type="hidden" name="id" value={a.id} />
-                          <label className="mr-1 inline-flex items-center gap-1">
-                            <input type="checkbox" name="entregar" defaultChecked /> entregar a caja central
-                          </label>
-                        </FormAccion>
+                        <a className="btn btn-exito px-2 py-0.5 text-xs" href={`/arqueo?id=${a.id}`}>
+                          Revisar
+                        </a>
                         <BotonAccion accion={accionArqueoBorrar} campos={{ id: a.id }} confirmar={`¿Borrar el cuadre #${a.numero}? La caja se vuelve a cuadrar desde el anterior.`} className="text-danger hover:underline">
                           Borrar
                         </BotonAccion>
@@ -119,7 +136,167 @@ export default async function PaginaArqueo({ searchParams }: { searchParams: SP 
           </table>
         </div>
       ) : (
-        <Vacio>Todavía no hay cuadres.</Vacio>
+        <Vacio>Todavía no hay cierres.</Vacio>
+      )}
+    </>
+  )
+}
+
+function Detalle({ a, ds, revisa, puedeEditar }: { a: Arqueo; ds: Dataset; revisa: boolean; puedeEditar: boolean }) {
+  const tienda = ds.tiendas.find((t) => t.id === a.tienda)?.nombre ?? a.tienda
+  const problemas = ITEMS_CHECKLIST.filter((i) => a.checklist && (!a.checklist[i.id]?.ok || a.checklist[i.id]?.obs)).map((i) => `${i.texto}${a.checklist?.[i.id]?.obs ? ` — ${a.checklist[i.id].obs}` : ' (sin marcar)'}`)
+  const incidencias = ITEMS_CHECKLIST.filter((i) => a.checklist?.[i.id]?.obs).map((i) => a.checklist![i.id].obs!)
+  return (
+    <>
+      <Encabezado titulo={`Cierre #${a.numero} · ${tienda}`} descripcion={`${a.cajaNombre} · ${TURNO_LABEL[a.turno ?? 'dia']} · ${hora(a.desde)} → ${hora(a.hasta)} · ${a.cajero ?? ''}`}>
+        <a className="btn" href="/arqueo">
+          Volver
+        </a>
+        <a className="btn" href={`/imprimir/arqueo?id=${a.id}`}>
+          Comprobante
+        </a>
+        {puedeEditar && (
+          <a className="btn" href={`/arqueo?id=${a.id}&editar=1`}>
+            {revisa ? 'Revisar y corregir' : 'Corregir'}
+          </a>
+        )}
+      </Encabezado>
+      <div className="grid gap-4 lg:grid-cols-2">
+        <CompartirWhatsApp
+          datos={{
+            tienda,
+            turno: a.turno ?? 'dia',
+            desde: a.desde,
+            hasta: a.hasta,
+            cajero: a.cajero,
+            venta: a.ventaTienda + a.domicilio + a.plataforma,
+            pax: a.tpv.pax ?? {},
+            paxCompra: a.paxCompra,
+            paxMuseo: a.paxMuseo,
+            tramos: a.tpv.tramos ?? [],
+            inversor: a.energia?.inversor,
+            ecoflow: a.energia?.ecoflow,
+            incidencias,
+          }}
+        />
+        <div className="tarjeta p-4 text-sm">
+          <div className="grid grid-cols-2 gap-y-1">
+            <span>Venta (subtotal)</span>
+            <span className="text-right">{f2(a.ventaTienda + a.domicilio + a.plataforma)}</span>
+            <span>Transferencias</span>
+            <span className="text-right">{f2(a.transferencias.reduce((x, t) => x + t.importe, 0))}</span>
+            <span>Otros gastos</span>
+            <span className="text-right">{f2(a.gastos.reduce((x, g) => x + g.importe, 0))}</span>
+            <span>Efectivo esperado</span>
+            <span className="text-right font-semibold">{f2(a.esperado)}</span>
+            <span>Total de efectivo</span>
+            <span className="text-right font-semibold">{f2(a.contado)}</span>
+            <span>Diferencia</span>
+            <span className={`text-right font-semibold ${a.diferencia < -0.5 ? 'text-danger' : a.diferencia > 0.5 ? 'text-amber-600' : 'text-accent'}`}>{Math.abs(a.diferencia) < 0.5 ? 'Cuadra' : f2(a.diferencia)}</span>
+            <span>Salario {a.estado === 'aprobado' ? 'aprobado' : 'propuesto'}</span>
+            <span className="text-right">{f2(a.salario)}</span>
+            <span>A entregar a la caja central</span>
+            <span className="text-right">{f2(a.contado - a.fondo)}</span>
+          </div>
+          <div className="mt-3">
+            {a.estado === 'aprobado' ? (
+              <Chip tono="verde">
+                Aprobado por {a.revisadoPor} el {a.revisadoEn?.slice(0, 10)}
+              </Chip>
+            ) : (
+              <Chip tono="ambar">Pendiente de revisión del contador</Chip>
+            )}
+            {a.editadoPor && <span className="ml-2 text-xs text-muted-foreground">Corregido por {a.editadoPor}</span>}
+          </div>
+          {revisa && a.estado === 'pendiente' && (
+            <div className="mt-3 rounded border border-border p-3">
+              <h3 className="mb-2 font-semibold">Revisión del contador</h3>
+              <FormAccion accion={accionArqueoAprobar} boton="Aprobar y registrar" claseBoton="btn btn-exito mt-2" confirmar={`¿Aprobar el cierre #${a.numero}?`} limpiar={false}>
+                <input type="hidden" name="id" value={a.id} />
+                <div className="grid gap-2 sm:grid-cols-3">
+                  <label>
+                    <span className="etiqueta">Trabajador que cobra</span>
+                    <input name="trabajador" defaultValue={a.cajero} className="input" required />
+                  </label>
+                  <label>
+                    <span className="etiqueta">Salario a pagar (CUP)</span>
+                    <input name="salario" defaultValue={a.salario} inputMode="decimal" className="input text-right" />
+                  </label>
+                  <label>
+                    <span className="etiqueta">Descontar faltante de caja</span>
+                    <input name="faltante" defaultValue={a.diferencia < -0.5 ? Math.round(-a.diferencia * 100) / 100 : ''} inputMode="decimal" className="input text-right" placeholder="0" />
+                  </label>
+                </div>
+                <label className="mt-2 inline-flex items-center gap-1 text-xs">
+                  <input type="checkbox" name="entregar" defaultChecked /> entregar el efectivo ({f2(a.contado - a.fondo)} menos el fondo) a la caja central
+                </label>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Los gastos van a la caja de la tienda; el salario queda «por pagar» en la cuenta del trabajador (Pagos al personal), donde también se le pueden descontar faltantes de inventario que aparezcan después.
+                  {!inventarioRevisado(a, ds.conteos) && ' Todavía no hay un conteo de la tienda posterior a este turno.'}
+                </p>
+              </FormAccion>
+            </div>
+          )}
+          {a.energia && (a.energia.inversor != null || a.energia.ecoflow != null) && (
+            <p className="mt-3">
+              Inversor {a.energia.inversor ?? '—'} % · EcoFlow {a.energia.ecoflow ?? '—'} %
+            </p>
+          )}
+          {a.firmas && (
+            <p className="mt-1 text-xs">
+              {(['cajero', 'dependiente', 'seguridad'] as const)
+                .filter((r) => a.firmas?.[r])
+                .map((r) => `${r}: entrega ${a.firmas![r]!.entrega ?? '—'}, recibe ${a.firmas![r]!.recibe ?? '—'}`)
+                .join(' · ')}
+            </p>
+          )}
+        </div>
+      </div>
+      {a.checklist && (
+        <div className="tarjeta mt-4 p-4 text-sm">
+          <h3 className="font-semibold">Check list {problemas.length ? `· ${problemas.length} a revisar` : '· todo bien'}</h3>
+          <ul className="mt-1 list-disc pl-5">
+            {problemas.map((p) => (
+              <li key={p}>{p}</li>
+            ))}
+          </ul>
+          <p className="mt-1 text-xs text-muted-foreground">{CHECKLIST.map((c) => c.titulo).join(' · ')}</p>
+        </div>
+      )}
+      {a.tarjetas && a.tarjetas.length > 0 && (
+        <div className="tarjeta mt-4 overflow-x-auto">
+          <table className="tabla">
+            <thead>
+              <tr>
+                <th>Cuenta</th>
+                <th>Número</th>
+                <th className="num">Importe</th>
+                <th>Carnet</th>
+                <th>Titular</th>
+              </tr>
+            </thead>
+            <tbody>
+              {a.tarjetas.map((t, i) => (
+                <tr key={i}>
+                  <td>{t.cuenta}</td>
+                  <td className="font-mono text-xs">{t.numero}</td>
+                  <td className="num">{f2(t.importe)}</td>
+                  <td className="text-xs">{t.ci}</td>
+                  <td className="text-xs">{t.titular}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {a.fotos && a.fotos.length > 0 && (
+        <div className="tarjeta mt-4 flex flex-wrap gap-2 p-4">
+          {a.fotos.map((f) => (
+            <a key={f} href={`/api/foto?p=${encodeURIComponent(f)}`} target="_blank" rel="noreferrer">
+              <img src={`/api/foto?p=${encodeURIComponent(f)}`} alt="" className="h-32 w-32 rounded border border-border object-cover" />
+            </a>
+          ))}
+        </div>
       )}
     </>
   )

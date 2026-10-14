@@ -10,8 +10,9 @@ import { escrituraAxis, mapaAreas, proponerAreas } from '@/lib/axispos'
 import { monedasConTasa, notaKA, prepararEnvioCompra, SERIE_INICIAL } from '@/lib/axispos-envio'
 import { esEntrega, GRUPOS_PRECIO, movimientosEntrega, productoDesdeItem } from '@/lib/sincro'
 import { resultadoConteo } from '@/lib/conteo'
+import { nombreTrabajador } from '@/lib/nomina'
 import { esDelTPV, propuestasCasar } from '@/lib/casar'
-import { BILLETES_CUP, calcularCuadre, horaCuba, resumenTurno, salarioSugerido, type ResumenTurno } from '@/lib/turno'
+import { BILLETES_CUP, calcularCuadre, horaCuba, ITEMS_CHECKLIST, porCuenta, resumenTurno, salarioSugerido, turnoDeHora, type ResumenTurno } from '@/lib/turno'
 import { DEFAULT_SETTINGS } from '@/lib/catalogo'
 import { cargarDataset, leerUsuarios, registrarAuditoria } from '@/lib/data'
 import { COLECCIONES_OPERATIVAS, DEFECTOS } from '@/lib/defectos'
@@ -21,7 +22,7 @@ import type { LoteKM } from '@/lib/importar-km'
 import { leerArchivo, type TipoImport } from '@/lib/plantillas'
 import { esAdminEconomica, revisaArqueos, revisaConteos, ROLES_LISTA } from '@/lib/permisos'
 import { borrarSubida, leerSubida, mutar } from '@/lib/store'
-import type { Arqueo, Asiento, Categoria, Conteo, LineaConteo, CategoriaPago, Compra, Dataset, Deuda, EnvioAxis, LineaER, Moneda, Movimiento, Producto, Rol, Salida, Settings, Tasa, Tienda, Usuario } from '@/lib/types'
+import type { ApunteNomina, Arqueo, Asiento, Categoria, Conteo, LineaConteo, CategoriaPago, Compra, Dataset, Deuda, EnvioAxis, LineaER, Moneda, Movimiento, Producto, Rol, Salida, Settings, Tasa, Tienda, Usuario } from '@/lib/types'
 
 export type Resultado = { ok: true; mensaje?: string } | { ok: false; error: string }
 
@@ -925,10 +926,68 @@ export async function accionConteoAprobarAjuste(_prev: Resultado | null, form: F
     const area = str(form, 'area')
     if (!(ds.tiendas.find((t) => t.id === c.tienda)?.codigoTPV ?? '').split(',').map((x) => x.trim()).includes(area)) throw new Error('Elige un área de la tienda.')
     const ajuste = { area, aprobadoPor: s.nombre ?? s.email, aprobadoEn: new Date().toISOString() }
-    await mutar({ conteos: [] as Conteo[] }, ({ conteos }) => ({ conteos: conteos.map((x) => (x.id === c.id ? { ...x, ajuste } : x)) }))
+    // El faltante puede descontarse a quien estaba de turno (se le rebaja de lo que tenga por cobrar).
+    const trabajador = nombreTrabajador(str(form, 'descontarA'))
+    const importe = numero(form, 'descuento', false) ?? 0
+    const apunte: ApunteNomina[] =
+      trabajador && importe > 0
+        ? [{ id: uid(), trabajador, tienda: c.tienda, fecha: (c.cierre ?? c.inicio).slice(0, 10), tipo: 'descuento', importe, concepto: `Faltante de inventario · conteo #${c.numero}`, conteo: c.id, usuario: s.email, ts: ajuste.aprobadoEn }]
+        : []
+    await mutar({ conteos: [] as Conteo[], nomina: [] as ApunteNomina[] }, ({ conteos, nomina }) => ({ conteos: conteos.map((x) => (x.id === c.id ? { ...x, ajuste } : x)), nomina: [...nomina, ...apunte] }))
     await registrarAuditoria([{ usuario: s.email, accion: 'aprobar ajuste de conteo', coleccion: 'conteos', ref: `#${c.numero}`, detalle: `área ${area}, ${c.resultado.filter((r) => r.diferencia).length} productos` }])
     refrescar()
     return { ok: true, mensaje: escrituraAxis() ? 'Ajuste aprobado.' : 'Ajuste aprobado. Queda pendiente de pasar al TPV (modo ensayo): mientras tanto, hazlo en AxisPOS y llegará solo en la sincronización.' }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+// ---------------------------------------------------------------- pagos al personal
+
+/** Descuento o pago manual en la cuenta de un trabajador. El pago sale de la caja elegida como SALARIO DEPENDIENTE. */
+export async function accionNominaApunte(_prev: Resultado | null, form: FormData): Promise<Resultado> {
+  try {
+    const ds = await cargarDataset()
+    const s = await autorizar('personal', str(form, 'tienda'))
+    const tienda = tiendaDe(s, form, ds)
+    const tipo = str(form, 'tipo')
+    if (tipo !== 'descuento' && tipo !== 'pago' && tipo !== 'devengo') throw new Error('Tipo no válido.')
+    const trabajador = nombreTrabajador(str(form, 'trabajador'))
+    if (!trabajador) throw new Error('Falta el trabajador.')
+    const importe = numero(form, 'importe')!
+    if (!(importe > 0)) throw new Error('El importe debe ser mayor que 0.')
+    const f = fecha(form)
+    comprobarMes(s, ds.settings, f)
+    const ahora = new Date().toISOString()
+    const id = uid()
+    let mov: Movimiento | undefined
+    if (tipo === 'pago') {
+      const caja = str(form, 'caja') || tienda
+      if (!ds.tiendas.some((t) => t.id === caja)) throw new Error('Caja no válida.')
+      mov = { id: uid(), libro: 'caja', fecha: f, tienda: caja, categoria: 'SALARIO DEPENDIENTE', concepto: `Pago a ${trabajador}${str(form, 'concepto') ? ` · ${str(form, 'concepto')}` : ''}`, tipo: 'Salida', moneda: 'CUP', monto: importe, origen: 'manual', comprobante: `NOM-${id.slice(0, 8)}` }
+    }
+    const apunte: ApunteNomina = { id, trabajador, tienda, fecha: f, tipo, importe, concepto: str(form, 'concepto') || (tipo === 'pago' ? 'Pago' : tipo === 'descuento' ? 'Descuento' : 'Devengo'), movimiento: mov?.id, usuario: s.email, ts: ahora }
+    await mutar({ nomina: [] as ApunteNomina[], movimientos: [] as Movimiento[] }, (x) => ({ nomina: [...x.nomina, apunte], movimientos: mov ? [...x.movimientos, mov] : x.movimientos }))
+    await registrarAuditoria([{ usuario: s.email, accion: `nómina: ${tipo}`, coleccion: 'nomina', ref: trabajador, detalle: `${importe} CUP · ${apunte.concepto}` }])
+    refrescar()
+    return { ok: true, mensaje: tipo === 'pago' ? `Pago de ${importe} CUP a ${trabajador} registrado en caja.` : `${tipo === 'descuento' ? 'Descuento' : 'Devengo'} registrado a ${trabajador}.` }
+  } catch (e) {
+    return fallo(e)
+  }
+}
+
+/** Anula un apunte de la cuenta de un trabajador (si era un pago, también su movimiento de caja). */
+export async function accionNominaBorrar(_prev: Resultado | null, form: FormData): Promise<Resultado> {
+  try {
+    const ds = await cargarDataset()
+    const a = ds.nomina.find((x) => x.id === str(form, 'id'))
+    if (!a) throw new Error('El apunte ya no existe.')
+    const s = await autorizar('personal', a.tienda)
+    comprobarMes(s, ds.settings, a.fecha)
+    await mutar({ nomina: [] as ApunteNomina[], movimientos: [] as Movimiento[] }, (x) => ({ nomina: x.nomina.filter((y) => y.id !== a.id), movimientos: a.movimiento ? x.movimientos.filter((m) => m.id !== a.movimiento) : x.movimientos }))
+    await registrarAuditoria([{ usuario: s.email, accion: 'nómina: anular', coleccion: 'nomina', ref: a.trabajador, detalle: `${a.tipo} ${a.importe} · ${a.concepto}` }])
+    refrescar()
+    return { ok: true, mensaje: 'Apunte anulado.' }
   } catch (e) {
     return fallo(e)
   }
@@ -947,16 +1006,22 @@ function cajasDe(ds: Dataset, tienda: string) {
 const HORA = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/
 const conSegundos = (h: string) => (h.length === 16 ? `${h}:00` : h)
 
-/** Ventas de una caja en el TPV entre dos horas locales (solo lectura). */
+/** Ventas de una caja en el TPV entre dos horas locales (solo lectura), con los Pax y los tramos del reporte. */
 async function turnoTPV(ds: Dataset, caja: string, desde: string, hasta: string) {
   const r = await clienteAxis(ds).exportarOperaciones(caja, { desde: desde.slice(0, 10), hasta: hasta.slice(0, 10), operTypes: [2, 34] })
   const usuarios = new Map((ds.settings.axispos?.usuariosTPV ?? []).map((u) => [u.code, u.nombre]))
-  return resumenTurno(r.operaciones, desde, hasta, usuarios)
+  return resumenTurno(r.operaciones, desde, hasta, usuarios, ds.settings.cortesTurno ?? ['02:00'])
+}
+
+/** Tasa a la que se valora el USD/EUR del cuadre: la de venta de la tienda (Toque + margen), con la que cobra el TPV. */
+function tasasTienda(ds: Dataset, fecha: string) {
+  const t = tasaVigente(prepararTasas(ds.tasas, ds.settings.margenTasa), fecha)
+  return { usd: t ? (t.kmVenta ?? t.cupUsd + ds.settings.margenTasa) : 0, eur: t?.cupEur ? t.cupEur + ds.settings.margenTasa : 0 }
 }
 
 export type ResultadoTurno = Resultado & { turno?: { tienda: string; caja: string; desde: string; hasta: string; resumen: ResumenTurno; salario: number; tasaUSD: number; tasaEUR: number } }
 
-/** Paso 1 del cuadre: trae del TPV las ventas de la caja desde el cuadre anterior hasta ahora. */
+/** Paso 1 del cierre: trae del TPV las ventas de la caja desde el cierre anterior hasta ahora. */
 export async function accionTurnoPreparar(_prev: ResultadoTurno | null, form: FormData): Promise<ResultadoTurno> {
   try {
     const ds = await cargarDataset()
@@ -966,24 +1031,12 @@ export async function accionTurnoPreparar(_prev: ResultadoTurno | null, form: Fo
     if (!cajasDe(ds, tienda).some((c) => c.code === caja)) throw new Error('Elige la caja.')
     const anterior = ds.arqueos.filter((a) => a.caja === caja).sort((x, y) => y.hasta.localeCompare(x.hasta))[0]
     const desde = anterior?.hasta ?? (HORA.test(str(form, 'desde')) ? conSegundos(str(form, 'desde')) : '')
-    if (!desde) throw new Error('Es el primer cuadre de esta caja: indica a qué hora empezó el turno.')
+    if (!desde) throw new Error('Es el primer cierre de esta caja: indica a qué hora empezó el turno.')
     const hasta = horaCuba()
     if (hasta <= desde) throw new Error('El turno no puede terminar antes de empezar.')
     const resumen = await turnoTPV(ds, caja, desde, hasta)
-    const t = tasaVigente(prepararTasas(ds.tasas, ds.settings.margenTasa), hasta.slice(0, 10))
-    return {
-      ok: true,
-      turno: {
-        tienda,
-        caja,
-        desde,
-        hasta,
-        resumen,
-        salario: salarioSugerido(resumen.venta, ds.settings.pctSalarioCajero ?? 0.03),
-        tasaUSD: resumen.tasas.USD ?? (t ? (t.kmVenta ?? t.cupUsd + ds.settings.margenTasa) : 0),
-        tasaEUR: resumen.tasas.EUR ?? (t?.cupEur ? t.cupEur + ds.settings.margenTasa : 0),
-      },
-    }
+    const tasas = tasasTienda(ds, hasta.slice(0, 10))
+    return { ok: true, turno: { tienda, caja, desde, hasta, resumen, salario: salarioSugerido(resumen.venta, ds.settings.pctSalarioCajero ?? 0.03), tasaUSD: tasas.usd, tasaEUR: tasas.eur } }
   } catch (e) {
     return fallo(e)
   }
@@ -995,37 +1048,59 @@ const listaForm = (form: FormData, a: string, b: string) => {
   return xs.map((x, i) => ({ x: x.trim(), n: ys[i] })).filter((r) => r.x && Number.isFinite(r.n) && r.n !== 0)
 }
 
-/** Paso 2: guarda el cuadre de turno (queda pendiente de que lo revise el contador). Devuelve el id del comprobante. */
+/**
+ * Paso 2: guarda el cierre de turno (cuadre, ventas por tarjeta, check list, energía, firmas y fotos).
+ * Lo hace el dependiente y queda pendiente; con `id`, el contador (o su autor mientras esté pendiente) lo corrige.
+ */
 export async function accionArqueo(_prev: (Resultado & { id?: string }) | null, form: FormData): Promise<Resultado & { id?: string }> {
   try {
     const ds = await cargarDataset()
-    const s = await autorizar('arqueo', str(form, 'tienda'))
-    const tienda = tiendaDe(s, form, ds)
-    const caja = str(form, 'caja')
+    const previo = str(form, 'id') ? ds.arqueos.find((x) => x.id === str(form, 'id')) : undefined
+    if (str(form, 'id') && !previo) throw new Error('El cierre ya no existe.')
+    const s = await autorizar('arqueo', previo?.tienda ?? str(form, 'tienda'))
+    if (previo) {
+      if (previo.estado !== 'pendiente') throw new Error('Un cierre aprobado ya no se cambia.')
+      if (!revisaArqueos(s.rol) && previo.usuario !== s.email) throw new Error('Solo el contador corrige cierres de otros.')
+    }
+    const tienda = previo?.tienda ?? tiendaDe(s, form, ds)
+    const caja = previo?.caja ?? str(form, 'caja')
     const cajaInfo = cajasDe(ds, tienda).find((c) => c.code === caja)
     if (!cajaInfo) throw new Error('Elige la caja.')
-    const desde = str(form, 'desde')
-    const hasta = str(form, 'hasta')
+    const desde = previo?.desde ?? str(form, 'desde')
+    const hasta = previo?.hasta ?? str(form, 'hasta')
     if (!HORA.test(desde) || !HORA.test(hasta) || hasta <= desde) throw new Error('Turno no válido: vuelve a traer las ventas.')
-    const anterior = ds.arqueos.filter((a) => a.caja === caja).sort((x, y) => y.hasta.localeCompare(x.hasta))[0]
-    if (anterior && desde < anterior.hasta) throw new Error(`Ya hay un cuadre de esta caja hasta ${anterior.hasta.replace('T', ' ')}: vuelve a traer las ventas.`)
+    if (!previo) {
+      const anterior = ds.arqueos.filter((a) => a.caja === caja).sort((x, y) => y.hasta.localeCompare(x.hasta))[0]
+      if (anterior && desde < anterior.hasta) throw new Error(`Ya hay un cierre de esta caja hasta ${anterior.hasta.replace('T', ' ')}: vuelve a traer las ventas.`)
+    }
     const n = (k: string) => numero(form, k, false) ?? 0
+    const nOpc = (k: string) => numero(form, k, false)
     // La venta en tienda se vuelve a leer del TPV con el mismo turno: no se fía de lo que llegue del navegador.
     let avisoTPV: string | undefined
-    let tpv: Arqueo['tpv'] = { tickets: 0, venta: 0, efectivo: 0, noEfectivo: {}, efectivoPorMoneda: {}, porCajero: {} }
+    let tpv: Arqueo['tpv'] = previo?.tpv ?? { tickets: 0, venta: 0, efectivo: 0, noEfectivo: {}, efectivoPorMoneda: {}, porCajero: {} }
     try {
       const r = await turnoTPV(ds, caja, desde, hasta)
-      tpv = { tickets: r.tickets, venta: r.venta, efectivo: r.efectivo, noEfectivo: r.noEfectivo, efectivoPorMoneda: r.efectivoPorMoneda, porCajero: r.porCajero }
+      tpv = { tickets: r.tickets, venta: r.venta, efectivo: r.efectivo, noEfectivo: r.noEfectivo, efectivoPorMoneda: r.efectivoPorMoneda, porCajero: r.porCajero, pax: r.pax, tramos: r.tramos }
     } catch (e) {
       avisoTPV = `No se pudo leer el TPV; la venta en tienda es la que se escribió a mano (${e instanceof Error ? e.message : String(e)}).`
     }
+    const tarjetas = form
+      .getAll('tj_importe')
+      .map((v, i) => ({
+        cuenta: String(form.getAll('tj_cuenta')[i] ?? 'FISCAL').trim().toUpperCase() || 'FISCAL',
+        numero: String(form.getAll('tj_numero')[i] ?? '').trim(),
+        importe: Number(String(v).replace(/\s/g, '').replace(',', '.')),
+        ci: String(form.getAll('tj_ci')[i] ?? '').trim() || undefined,
+        titular: String(form.getAll('tj_titular')[i] ?? '').trim() || undefined,
+      }))
+      .filter((t) => Number.isFinite(t.importe) && t.importe !== 0)
     const datos = {
-      ventaTienda: avisoTPV ? n('ventaTienda') : tpv.venta,
+      ventaTienda: avisoTPV ? n('ventaTienda') || (previo?.ventaTienda ?? 0) : tpv.venta,
       domicilio: n('domicilio'),
       plataforma: n('plataforma'),
       gastos: listaForm(form, 'gasto_concepto', 'gasto_importe').map((r, i) => ({ concepto: r.x, importe: r.n, categoria: String(form.getAll('gasto_categoria')[i] ?? '') || undefined })),
       salario: n('salario'),
-      transferencias: listaForm(form, 'transf_cuenta', 'transf_importe').map((r) => ({ cuenta: r.x.toUpperCase(), importe: r.n })),
+      transferencias: porCuenta(tarjetas),
       porCobrar: n('porCobrar'),
       billetes: BILLETES_CUP.map((v) => ({ valor: v, cantidad: n(`b_${v}`) })).filter((b) => b.cantidad),
       sueltosCUP: n('sueltosCUP'),
@@ -1034,18 +1109,35 @@ export async function accionArqueo(_prev: (Resultado & { id?: string }) | null, 
       eur: n('eur'),
       tasaEUR: n('tasaEUR'),
       otros: n('otros'),
+      fondo: n('fondo'),
     }
     if (datos.billetes.some((b) => b.cantidad < 0 || !Number.isInteger(b.cantidad))) throw new Error('Las cantidades de billetes tienen que ser números enteros.')
     if ((datos.usd && !datos.tasaUSD) || (datos.eur && !datos.tasaEUR)) throw new Error('Falta la tasa del USD o del EUR.')
+    const checklist: NonNullable<Arqueo['checklist']> = {}
+    for (const it of ITEMS_CHECKLIST) {
+      const obs = str(form, `obs_${it.id}`)
+      checklist[it.id] = { ok: form.get(`ck_${it.id}`) === 'on', ...(obs ? { obs } : {}) }
+    }
+    const firmas: NonNullable<Arqueo['firmas']> = {}
+    for (const r of ['cajero', 'dependiente', 'seguridad'] as const) {
+      const entrega = str(form, `f_${r}_entrega`)
+      const recibe = str(form, `f_${r}_recibe`)
+      if (entrega || recibe) firmas[r] = { entrega: entrega || undefined, recibe: recibe || undefined }
+    }
+    const fotos = form.getAll('fotos').map(String).filter((f) => f.startsWith('fotos/')).slice(0, 12)
     const c = calcularCuadre(datos)
-    const id = uid()
+    const id = previo?.id ?? uid()
     const ahora = new Date().toISOString()
-    let num = 0
+    let num = previo?.numero ?? 0
+    const turno = str(form, 'turno') === 'dia' || str(form, 'turno') === 'noche' ? (str(form, 'turno') as 'dia' | 'noche') : turnoDeHora(hasta)
     await mutar({ arqueos: [] as Arqueo[] }, ({ arqueos }) => {
-      const ultimo = arqueos.filter((a) => a.caja === caja).sort((x, y) => y.hasta.localeCompare(x.hasta))[0]
-      if (ultimo && desde < ultimo.hasta) throw new Error('Otra persona cuadró esta caja mientras tanto: vuelve a traer las ventas.')
-      num = arqueos.reduce((m, a) => Math.max(m, a.numero), 0) + 1
+      if (!previo) {
+        const ultimo = arqueos.filter((a) => a.caja === caja).sort((x, y) => y.hasta.localeCompare(x.hasta))[0]
+        if (ultimo && desde < ultimo.hasta) throw new Error('Otra persona cerró esta caja mientras tanto: vuelve a traer las ventas.')
+        num = arqueos.reduce((m, a) => Math.max(m, a.numero), 0) + 1
+      } else if (arqueos.find((x) => x.id === id)?.estado !== 'pendiente') throw new Error('El cierre ya fue aprobado.')
       const a: Arqueo = {
+        ...(previo ?? {}),
         id,
         numero: num,
         tienda,
@@ -1054,67 +1146,89 @@ export async function accionArqueo(_prev: (Resultado & { id?: string }) | null, 
         desde,
         hasta,
         fecha: hasta.slice(0, 10),
-        ts: ahora,
-        usuario: s.email,
-        nombreUsuario: s.nombre,
+        ts: previo?.ts ?? ahora,
+        usuario: previo?.usuario ?? s.email,
+        nombreUsuario: previo?.nombreUsuario ?? s.nombre,
+        turno,
         cajero: str(form, 'cajero') || undefined,
         trabajadores: Math.max(1, Math.round(n('trabajadores')) || 1),
         tpv,
+        paxCompra: nOpc('paxCompra'),
+        paxMuseo: nOpc('paxMuseo'),
         ...datos,
+        tarjetas,
         esperado: c.esperado,
         contado: c.contado,
         diferencia: c.diferencia,
-        fondo: n('fondo'),
+        aEntregar: c.aEntregar,
         avisoTPV,
         observaciones: str(form, 'observaciones') || undefined,
+        checklist,
+        energia: { inversor: nOpc('inversor'), ecoflow: nOpc('ecoflow') },
+        firmas,
+        fotos,
+        ...(previo ? { editadoPor: s.nombre ?? s.email, editadoEn: ahora } : {}),
         estado: 'pendiente',
       }
-      return { arqueos: [a, ...arqueos] }
+      return { arqueos: previo ? arqueos.map((x) => (x.id === id ? a : x)) : [a, ...arqueos] }
     })
-    await registrarAuditoria([{ usuario: s.email, accion: 'cuadre de turno', coleccion: 'arqueos', ref: `#${num}`, detalle: `${cajaInfo.nombre} ${desde}→${hasta}: esperado ${c.esperado}, contado ${c.contado}, diferencia ${c.diferencia}` }])
+    await registrarAuditoria([{ usuario: s.email, accion: previo ? 'corregir cierre de turno' : 'cierre de turno', coleccion: 'arqueos', ref: `#${num}`, detalle: `${cajaInfo.nombre} ${desde}→${hasta}: esperado ${c.esperado}, contado ${c.contado}, diferencia ${c.diferencia}` }])
     refrescar()
-    return { ok: true, mensaje: `Cuadre #${num} guardado.`, id }
+    return { ok: true, mensaje: `Cierre #${num} ${previo ? 'corregido' : 'guardado'}.`, id }
   } catch (e) {
     return fallo(e)
   }
 }
 
 /**
- * El contador revisa y aprueba el cuadre: se registran en la caja de la tienda los gastos y el salario pagados
- * en el turno y, si se marca, la entrega del efectivo (menos el fondo) a la caja central.
+ * El contador revisa y aprueba el cierre: se registran en la caja de la tienda los gastos y el salario pagados
+ * en el turno y, si se marca, la entrega del efectivo (contado − salario − fondo) a la caja central.
  */
 export async function accionArqueoAprobar(_prev: Resultado | null, form: FormData): Promise<Resultado> {
   try {
     const ds = await cargarDataset()
     const a = ds.arqueos.find((x) => x.id === str(form, 'id'))
-    if (!a) throw new Error('El cuadre ya no existe.')
+    if (!a) throw new Error('El cierre ya no existe.')
     const s = await autorizar('arqueo', a.tienda)
-    if (!revisaArqueos(s.rol)) throw new Error('Solo el contador o administración aprueban cuadres.')
+    if (!revisaArqueos(s.rol)) throw new Error('Solo el contador o administración aprueban cierres.')
     if (a.estado === 'aprobado') throw new Error('Ya estaba aprobado.')
     comprobarMes(s, ds.settings, a.fecha)
     const t = ds.tiendas.find((x) => x.id === a.tienda)!
     const matriz = ds.tiendas.find((x) => x.tipo === 'matriz')
     const base = { libro: 'caja' as const, fecha: a.fecha, tienda: a.tienda, moneda: 'CUP' as const, tipo: 'Salida' as const, origen: 'manual' as const, comprobante: `CT-${a.numero}`, cajero: a.cajero }
-    const movs: Movimiento[] = [
-      ...a.gastos.map((g) => ({ ...base, id: uid(), categoria: g.categoria || 'OTROS GASTOS', concepto: `${g.concepto} · cuadre #${a.numero}`, monto: g.importe })),
-      ...(a.salario ? [{ ...base, id: uid(), categoria: 'SALARIO DEPENDIENTE', concepto: `Salario ${a.cajero ?? ''} (${a.trabajadores}) · cuadre #${a.numero}`.replace('  ', ' '), monto: a.salario }] : []),
-    ]
+    const movs: Movimiento[] = a.gastos.map((g) => ({ ...base, id: uid(), categoria: g.categoria || 'OTROS GASTOS', concepto: `${g.concepto} · cierre #${a.numero}`, monto: g.importe }))
+    // El salario no sale de la caja: se devenga en la cuenta del trabajador y se paga en «Pagos al personal».
+    const trabajador = nombreTrabajador(str(form, 'trabajador') || a.cajero || '')
+    const salario = numero(form, 'salario', false) ?? a.salario
+    const ahora = new Date().toISOString()
+    const apuntes: ApunteNomina[] = []
+    if (salario > 0) {
+      if (!trabajador) throw new Error('Falta el nombre del trabajador que cobra el turno.')
+      apuntes.push({ id: uid(), trabajador, tienda: a.tienda, fecha: a.fecha, tipo: 'devengo', importe: salario, concepto: `Turno ${a.turno === 'noche' ? 'noche' : 'día'} ${a.fecha} · cierre #${a.numero}`, cierre: a.id, usuario: s.email, ts: ahora })
+    }
+    const faltante = numero(form, 'faltante', false) ?? 0
+    if (faltante > 0) {
+      if (!trabajador) throw new Error('Falta el nombre del trabajador al que se descuenta.')
+      apuntes.push({ id: uid(), trabajador, tienda: a.tienda, fecha: a.fecha, tipo: 'descuento', importe: faltante, concepto: `Faltante de caja · cierre #${a.numero}`, cierre: a.id, usuario: s.email, ts: ahora })
+    }
     if (form.get('entregar') === 'on') {
       if (!matriz) throw new Error('No hay Casa Matriz para recibir la entrega.')
+      // Todo el efectivo (incluido el salario, que se paga después) menos el fondo va a la caja central.
       const cup = Math.round((a.billetes.reduce((x, b) => x + b.valor * b.cantidad, 0) + a.sueltosCUP + a.otros - a.fondo) * 100) / 100
       for (const [moneda, monto] of [['CUP', cup], ['USD', a.usd], ['EUR', a.eur]] as [Moneda, number][])
-        if (monto > 0) movs.push(...movimientosEntrega({ id: uid(), fecha: a.fecha, tienda: a.tienda, nombreTienda: t.nombre, matriz: matriz.id, moneda, monto, cajero: a.cajero, nota: `Cuadre #${a.numero}` }))
+        if (monto > 0) movs.push(...movimientosEntrega({ id: uid(), fecha: a.fecha, tienda: a.tienda, nombreTienda: t.nombre, matriz: matriz.id, moneda, monto, cajero: a.cajero, nota: `Cierre #${a.numero}` }))
     }
-    await mutar({ movimientos: [] as Movimiento[], arqueos: [] as Arqueo[] }, (x) => {
+    await mutar({ movimientos: [] as Movimiento[], arqueos: [] as Arqueo[], nomina: [] as ApunteNomina[] }, (x) => {
       if (x.arqueos.find((y) => y.id === a.id)?.estado === 'aprobado') throw new Error('Ya estaba aprobado.')
       return {
         movimientos: [...x.movimientos, ...movs],
-        arqueos: x.arqueos.map((y) => (y.id === a.id ? { ...y, estado: 'aprobado' as const, revisadoPor: s.nombre ?? s.email, revisadoEn: new Date().toISOString(), movimientos: movs.map((m) => m.id) } : y)),
+        nomina: [...x.nomina, ...apuntes],
+        arqueos: x.arqueos.map((y) => (y.id === a.id ? { ...y, salario, estado: 'aprobado' as const, revisadoPor: s.nombre ?? s.email, revisadoEn: ahora, movimientos: movs.map((m) => m.id) } : y)),
       }
     })
-    await registrarAuditoria([{ usuario: s.email, accion: 'aprobar cuadre', coleccion: 'arqueos', ref: `#${a.numero}`, detalle: `${movs.length} movimientos de caja` }])
+    await registrarAuditoria([{ usuario: s.email, accion: 'aprobar cierre de turno', coleccion: 'arqueos', ref: `#${a.numero}`, detalle: `${movs.length} movimientos de caja; ${trabajador}: devengo ${salario}${faltante ? `, descuento ${faltante}` : ''}` }])
     refrescar()
-    return { ok: true, mensaje: `Cuadre #${a.numero} aprobado: ${movs.length} movimientos registrados en la caja de ${t.nombre}.` }
+    return { ok: true, mensaje: `Cierre #${a.numero} aprobado: ${movs.length} movimientos en caja; ${salario ? `${salario} CUP a pagar a ${trabajador}` : 'sin salario'}${faltante ? ` (descuento de ${faltante} por faltante)` : ''}.` }
   } catch (e) {
     return fallo(e)
   }

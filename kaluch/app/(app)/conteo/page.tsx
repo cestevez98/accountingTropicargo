@@ -6,6 +6,8 @@ import { catalogoEscaner } from '@/lib/conteo'
 import { cargarDataset, preferencias } from '@/lib/data'
 import { params, type SP } from '@/lib/pagina'
 import { revisaConteos } from '@/lib/permisos'
+import { faltanteConteo } from '@/lib/nomina'
+import { prepararTasas, tasaVigente } from '@/lib/fx'
 import { Escaner } from './Escaner'
 
 const f2 = (n: number | undefined) => (n == null ? '' : n.toLocaleString('es-ES', { maximumFractionDigits: 2 }))
@@ -33,6 +35,11 @@ export default async function Conteo({ searchParams }: { searchParams: SP }) {
       .filter(Boolean)
       .sort((a, b) => (ubic.get(b)?.tipo === 7 ? 1 : 0) - (ubic.get(a)?.tipo === 7 ? 1 : 0))
       .map((c) => ({ code: c, nombre: areaNombre(c) }))
+  const tasaHoy = tasaVigente(prepararTasas(ds.tasas, ds.settings.margenTasa), new Date().toISOString().slice(0, 10))?.cupUsd ?? 0
+  const porCodigo = new Map(ds.productos.map((p) => [p.codigo, p]))
+  const faltanteCUP = (c: (typeof ds.conteos)[number]) => faltanteConteo(c, (cod, usd) => porCodigo.get(cod)?.costoCUP ?? (porCodigo.get(cod)?.costoUSD ?? usd ?? 0) * tasaHoy)
+  // Quienes cerraron turno en la tienda últimamente (para descontarles un faltante).
+  const trabajadoresTienda = (t: string) => [...new Set(ds.arqueos.filter((a) => a.tienda === t && a.cajero).slice(0, 30).map((a) => a.cajero!))]
   const historia = ds.conteos.filter((c) => c.estado === 'cerrado' && (!fija || c.tienda === fija)).slice(0, 60)
 
   if (sel?.resultado || sel?.errorSistema) {
@@ -56,6 +63,22 @@ export default async function Conteo({ searchParams }: { searchParams: SP }) {
             ) : (
               <FormAccion accion={accionConteoAprobarAjuste} boton="Aprobar ajuste" claseBoton="btn btn-exito" limpiar={false} confirmar={`¿Aprobar el ajuste de ${conDif.length} productos?`}>
                 <input type="hidden" name="id" value={sel.id} />
+                <div className="mb-2 grid gap-2 sm:grid-cols-2">
+                  <label>
+                    <span className="etiqueta">Descontar el faltante a (opcional)</span>
+                    <input name="descontarA" list="trabajadores" className="input" placeholder="Trabajador del turno" />
+                    <datalist id="trabajadores">
+                      {trabajadoresTienda(sel.tienda).map((x) => (
+                        <option key={x} value={x} />
+                      ))}
+                    </datalist>
+                  </label>
+                  <label>
+                    <span className="etiqueta">Importe a descontar (CUP)</span>
+                    <input name="descuento" defaultValue={faltanteCUP(sel) || ''} inputMode="decimal" className="input text-right" />
+                    <span className="text-xs text-muted-foreground">Faltante a costo: {f2(faltanteCUP(sel))} CUP</span>
+                  </label>
+                </div>
                 <label className="mr-2 inline-flex items-center gap-2">
                   Área donde se ajusta:
                   <select name="area" className="input w-auto">

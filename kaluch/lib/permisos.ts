@@ -16,8 +16,9 @@ export type Seccion =
   | 'alertas'
   | 'conteo'
   | 'arqueo'
+  | 'personal'
 
-const TODO: Seccion[] = ['dashboard', 'importar', 'ventas', 'compras', 'caja', 'deudas', 'inventario', 'reportes', 'contabilidad', 'tasas', 'catalogos', 'integraciones', 'alertas', 'conteo', 'arqueo']
+const TODO: Seccion[] = ['dashboard', 'importar', 'ventas', 'compras', 'caja', 'deudas', 'inventario', 'reportes', 'contabilidad', 'tasas', 'catalogos', 'integraciones', 'alertas', 'conteo', 'arqueo', 'personal']
 
 /**
  * Roles de Kaluch Market (abre 24 horas):
@@ -32,8 +33,8 @@ export const ROLES: Record<Rol, { label: string; color: string; ver: Seccion[]; 
   contador_tienda: {
     label: 'Contador de tienda',
     color: '#0d9488',
-    ver: ['dashboard', 'importar', 'ventas', 'compras', 'caja', 'inventario', 'alertas', 'conteo', 'arqueo'],
-    registrar: ['importar', 'ventas', 'compras', 'caja', 'inventario', 'conteo', 'arqueo'],
+    ver: ['dashboard', 'importar', 'ventas', 'compras', 'caja', 'inventario', 'alertas', 'conteo', 'arqueo', 'personal'],
+    registrar: ['importar', 'ventas', 'compras', 'caja', 'inventario', 'conteo', 'arqueo', 'personal'],
   },
   dependiente: { label: 'Dependiente', color: '#0891b2', ver: ['conteo', 'arqueo'], registrar: ['conteo', 'arqueo'] },
   contador_fiscal: { label: 'Contador fiscal', color: '#7c3aed', ver: ['dashboard', 'caja', 'reportes', 'contabilidad', 'tasas'], registrar: [] },

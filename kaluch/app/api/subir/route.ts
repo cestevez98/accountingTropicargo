@@ -10,6 +10,11 @@ export async function POST(request: Request) {
       request,
       onBeforeGenerateToken: async (pathname) => {
         const s = await sesionActual()
+        // Fotos del cierre de turno (inversor, tickets del TPV, hoja firmada).
+        if (pathname.startsWith('fotos/')) {
+          if (!s || !puedeRegistrar(s, 'arqueo')) throw new Error('No autorizado')
+          return { allowedContentTypes: ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif'], maximumSizeInBytes: 15 * 1024 * 1024, addRandomSuffix: true }
+        }
         if (!s || !puedeRegistrar(s, 'importar')) throw new Error('No autorizado')
         if (!pathname.startsWith('importaciones/')) throw new Error('Ruta no válida')
         return {

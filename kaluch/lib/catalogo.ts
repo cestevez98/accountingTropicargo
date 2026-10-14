@@ -127,6 +127,7 @@ export const DEFAULT_SETTINGS: Settings = {
   margenMinimo: 0.3,
   pctSalarioCajero: 0.03,
   cuentasTransferencia: ['FISCAL', 'CARLOS', 'ROLY'],
+  cortesTurno: ['02:00'],
   pctReinversionDefecto: 0.05,
   pctInversionistaDefecto: 0.15,
   mesesCerrados: [],

@@ -1,8 +1,10 @@
 'use client'
 
+import { upload } from '@vercel/blob/client'
 import { useActionState, useEffect, useMemo, useState } from 'react'
 import { accionArqueo, accionTurnoPreparar, type Resultado, type ResultadoTurno } from '../../acciones'
-import { BILLETES_CUP, calcularCuadre } from '@/lib/turno'
+import { BILLETES_CUP, calcularCuadre, CHECKLIST, porCuenta, reporteWhatsApp, totalPax, turnoDeHora, TURNO_LABEL, type ResumenTurno } from '@/lib/turno'
+import type { Arqueo } from '@/lib/types'
 
 const f2 = (n: number) => n.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 const num = (v: string | undefined) => Number((v ?? '').replace(/\s/g, '').replace(',', '.')) || 0
@@ -11,16 +13,25 @@ const hora = (h: string) => h.replace('T', ' ').slice(0, 16)
 export interface CajaForm {
   code: string
   nombre: string
-  /** Fin del último cuadre de la caja (el nuevo turno empieza ahí). */
+  /** Fin del último cierre de la caja (el nuevo turno empieza ahí). */
   ultimo?: string
 }
 
+type Turno = NonNullable<ResultadoTurno['turno']>
+
+interface Comunes {
+  cajeros: string[]
+  cuentas: string[]
+  categorias: string[]
+  nombreTienda: Record<string, string>
+}
+
 /**
- * Cuadre de cambio de turno en dos pasos:
- * 1. Elegir la caja → se traen del TPV las ventas desde el cuadre anterior.
- * 2. Rellenar gastos, salario, transferencias y billetes → esperado, contado y diferencia en vivo.
+ * Cierre de cambio de turno en dos pasos:
+ * 1. Elegir la caja → se traen del TPV las ventas (y los Pax) desde el cierre anterior.
+ * 2. Rellenar la hoja: cuadre, ventas por tarjeta, check list, energía, firmas y fotos.
  */
-export function FormArqueo({ tiendas, tienda, cajeros, cuentas, categorias }: { tiendas: { id: string; nombre: string; cajas: CajaForm[] }[]; tienda?: string; cajeros: string[]; cuentas: string[]; categorias: string[] }) {
+export function FormArqueo({ tiendas, tienda, ...comunes }: { tiendas: { id: string; nombre: string; cajas: CajaForm[] }[]; tienda?: string } & Comunes) {
   const [t, setT] = useState(tienda ?? tiendas[0]?.id ?? '')
   const cajas = tiendas.find((x) => x.id === t)?.cajas ?? []
   const [caja, setCaja] = useState(cajas[0]?.code ?? '')
@@ -56,17 +67,17 @@ export function FormArqueo({ tiendas, tienda, cajeros, cuentas, categorias }: { 
           {cajaSel?.ultimo ? (
             <div className="text-sm">
               <span className="etiqueta">Turno desde</span>
-              <div className="py-2">{hora(cajaSel.ultimo)} (cuadre anterior)</div>
+              <div className="py-2">{hora(cajaSel.ultimo)} (cierre anterior)</div>
             </div>
           ) : (
             <label>
-              <span className="etiqueta">Inicio del turno (primer cuadre)</span>
+              <span className="etiqueta">Inicio del turno (primer cierre)</span>
               <input name="desde" type="datetime-local" className="input" required />
             </label>
           )}
         </div>
         <button className="btn btn-primario mt-3" disabled={preparando || !caja}>
-          {preparando ? 'Leyendo las ventas del TPV…' : 'Traer las ventas del turno'}
+          {preparando ? 'Leyendo las ventas del TPV…' : 'Cerrar el turno: traer las ventas'}
         </button>
         {prep && !prep.ok && (
           <p role="status" className="mt-2 text-sm text-danger">
@@ -75,20 +86,58 @@ export function FormArqueo({ tiendas, tienda, cajeros, cuentas, categorias }: { 
         )}
       </form>
     )
-  return <PasoCuadre key={`${turno.caja}${turno.hasta}`} turno={turno} cajaNombre={cajaSel?.nombre ?? turno.caja} cajeros={cajeros} cuentas={cuentas} categorias={categorias} />
+  return <HojaCierre key={`${turno.caja}${turno.hasta}`} turno={turno} cajaNombre={cajaSel?.nombre ?? turno.caja} {...comunes} />
 }
 
-function PasoCuadre({ turno, cajaNombre, cajeros, cuentas, categorias }: { turno: NonNullable<ResultadoTurno['turno']>; cajaNombre: string; cajeros: string[]; cuentas: string[]; categorias: string[] }) {
+/** Turno de un cierre ya guardado (para que el contador lo corrija). */
+export function turnoDeCierre(a: Arqueo): Turno {
+  const resumen: ResumenTurno = { tickets: a.tpv.tickets, venta: a.tpv.venta, efectivo: a.tpv.efectivo, noEfectivo: a.tpv.noEfectivo, efectivoPorMoneda: a.tpv.efectivoPorMoneda, tasas: {}, porCajero: a.tpv.porCajero, pax: a.tpv.pax ?? {}, tramos: a.tpv.tramos ?? [] }
+  return { tienda: a.tienda, caja: a.caja, desde: a.desde, hasta: a.hasta, resumen, salario: a.salario, tasaUSD: a.tasaUSD, tasaEUR: a.tasaEUR }
+}
+
+const PESTANAS = [
+  ['cuadre', 'Cuadre'],
+  ['tarjetas', 'Venta por tarjeta'],
+  ['checklist', 'Check list'],
+  ['entrega', 'Energía, firmas y fotos'],
+] as const
+
+export function HojaCierre({ turno, cajaNombre, inicial, cajeros, cuentas, categorias, nombreTienda }: { turno: Turno; cajaNombre: string; inicial?: Arqueo } & Comunes) {
   const r = turno.resumen
   const noEfectivo = Object.values(r.noEfectivo).reduce((s, v) => s + v, 0)
-  const [v, setV] = useState<Record<string, string>>({ salario: String(turno.salario), tasaUSD: String(turno.tasaUSD || ''), tasaEUR: String(turno.tasaEUR || ''), trabajadores: '1' })
-  const [gastos, setGastos] = useState([{ concepto: '', importe: '', categoria: 'OTROS GASTOS' }])
-  const [transf, setTransf] = useState(cuentas.map((c, i) => ({ cuenta: c, importe: i === 0 && noEfectivo ? String(noEfectivo) : '' })))
+  const ini = inicial
+  const [pest, setPest] = useState<(typeof PESTANAS)[number][0]>('cuadre')
+  const [v, setV] = useState<Record<string, string>>(() => {
+    const o: Record<string, string> = { salario: String(turno.salario), tasaUSD: String(turno.tasaUSD || ''), tasaEUR: String(turno.tasaEUR || ''), trabajadores: '1' }
+    if (ini) {
+      for (const k of ['domicilio', 'plataforma', 'porCobrar', 'sueltosCUP', 'usd', 'eur', 'otros', 'fondo', 'salario', 'tasaUSD', 'tasaEUR', 'trabajadores', 'paxCompra', 'paxMuseo'] as const) {
+        const x = (ini as unknown as Record<string, number | undefined>)[k]
+        if (x != null && x !== 0) o[k] = String(x)
+      }
+      for (const b of ini.billetes) o[`b_${b.valor}`] = String(b.cantidad)
+      if (ini.energia?.inversor != null) o.inversor = String(ini.energia.inversor)
+      if (ini.energia?.ecoflow != null) o.ecoflow = String(ini.energia.ecoflow)
+    }
+    return o
+  })
+  const [gastos, setGastos] = useState(ini?.gastos.length ? ini.gastos.map((g) => ({ concepto: g.concepto, importe: String(g.importe), categoria: g.categoria ?? 'OTROS GASTOS' })) : [{ concepto: '', importe: '', categoria: 'OTROS GASTOS' }])
+  const [tarjetas, setTarjetas] = useState(
+    ini?.tarjetas?.length
+      ? ini.tarjetas.map((t) => ({ cuenta: t.cuenta, numero: t.numero, importe: String(t.importe), ci: t.ci ?? '', titular: t.titular ?? '' }))
+      : ini?.transferencias.length
+        ? ini.transferencias.map((t) => ({ cuenta: t.cuenta, numero: '', importe: String(t.importe), ci: '', titular: '' }))
+        : [{ cuenta: cuentas[0] ?? 'FISCAL', numero: '', importe: '', ci: '', titular: '' }],
+  )
+  const [ck, setCk] = useState<Record<string, { ok: boolean; obs: string }>>(() => Object.fromEntries(Object.entries(ini?.checklist ?? {}).map(([k, x]) => [k, { ok: x.ok, obs: x.obs ?? '' }])))
+  const [fotos, setFotos] = useState<string[]>(ini?.fotos ?? [])
+  const [subiendo, setSubiendo] = useState('')
   const [estado, enviar, enviando] = useActionState<(Resultado & { id?: string }) | null, FormData>(accionArqueo, null)
   useEffect(() => {
-    if (estado?.ok && estado.id) window.location.href = `/imprimir/arqueo?id=${estado.id}`
+    if (estado?.ok && estado.id) window.location.href = `/arqueo?id=${estado.id}`
   }, [estado])
+
   const campo = (k: string, extra: React.InputHTMLAttributes<HTMLInputElement> = {}) => ({ name: k, value: v[k] ?? '', onChange: (e: React.ChangeEvent<HTMLInputElement>) => setV((x) => ({ ...x, [k]: e.target.value })), inputMode: 'decimal' as const, className: 'input text-right', ...extra })
+  const transferencias = porCuenta(tarjetas.map((t) => ({ cuenta: t.cuenta.toUpperCase(), importe: num(t.importe) })))
   const c = useMemo(
     () =>
       calcularCuadre({
@@ -97,7 +146,7 @@ function PasoCuadre({ turno, cajaNombre, cajeros, cuentas, categorias }: { turno
         plataforma: num(v.plataforma),
         gastos: gastos.map((g) => ({ concepto: g.concepto, importe: num(g.importe) })),
         salario: num(v.salario),
-        transferencias: transf.map((x) => ({ cuenta: x.cuenta, importe: num(x.importe) })),
+        transferencias,
         porCobrar: num(v.porCobrar),
         billetes: BILLETES_CUP.map((b) => ({ valor: b, cantidad: num(v[`b_${b}`]) })),
         sueltosCUP: num(v.sueltosCUP),
@@ -106,32 +155,57 @@ function PasoCuadre({ turno, cajaNombre, cajeros, cuentas, categorias }: { turno
         eur: num(v.eur),
         tasaEUR: num(v.tasaEUR),
         otros: num(v.otros),
+        fondo: num(v.fondo),
       }),
-    [r.venta, v, gastos, transf],
+    [r.venta, v, gastos, transferencias],
   )
   const transfDistinta = Math.abs(c.transferencias - noEfectivo) > 0.5
+  const pendientesCk = CHECKLIST.flatMap((s) => s.grupos.flatMap((g) => g.items)).filter((i) => !ck[i.id]?.ok).length
+
+  async function subirFotos(files: FileList | null) {
+    if (!files?.length) return
+    try {
+      for (const f of Array.from(files).slice(0, 12 - fotos.length)) {
+        setSubiendo(`Subiendo ${f.name}…`)
+        const b = await upload(`fotos/${turno.caja}-${turno.hasta.slice(0, 10)}-${f.name.replace(/[^\w.-]+/g, '_')}`, f, { access: 'private', handleUploadUrl: '/api/subir' })
+        setFotos((x) => [...x, b.pathname])
+      }
+      setSubiendo('')
+    } catch (e) {
+      setSubiendo(`No se pudo subir: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
   return (
     <form
       action={enviar}
       onSubmit={(e) => {
-        if (!confirm(`¿Guardar el cuadre? Diferencia: ${f2(c.diferencia)} CUP.`)) e.preventDefault()
+        if (!confirm(`¿Guardar el cierre? Diferencia: ${f2(c.diferencia)} CUP.${pendientesCk ? ` Quedan ${pendientesCk} tareas del check list sin marcar.` : ''}`)) e.preventDefault()
       }}
       className="mx-auto max-w-4xl"
     >
-      {['tienda', 'caja', 'desde', 'hasta'].map((k) => (
-        <input key={k} type="hidden" name={k} value={turno[k as 'tienda']} />
+      {ini ? <input type="hidden" name="id" value={ini.id} /> : ['tienda', 'caja', 'desde', 'hasta'].map((k) => <input key={k} type="hidden" name={k} value={turno[k as 'tienda']} />)}
+      {fotos.map((f) => (
+        <input key={f} type="hidden" name="fotos" value={f} />
       ))}
       <div className="tarjeta mb-3 p-4">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <h2 className="font-semibold">
-            {cajaNombre} · turno {hora(turno.desde)} → {hora(turno.hasta)}
+            {nombreTienda[turno.tienda]} · {cajaNombre} · {hora(turno.desde)} → {hora(turno.hasta)}
           </h2>
           <span className="text-xs text-muted-foreground">{r.tickets} tickets en el TPV</span>
         </div>
-        <div className="mt-2 grid gap-3 sm:grid-cols-3">
+        <div className="mt-2 grid gap-3 sm:grid-cols-4">
+          <label>
+            <span className="etiqueta">Turno</span>
+            <select name="turno" defaultValue={ini?.turno ?? turnoDeHora(turno.hasta)} className="input">
+              <option value="dia">{TURNO_LABEL.dia}</option>
+              <option value="noche">{TURNO_LABEL.noche}</option>
+            </select>
+          </label>
           <label>
             <span className="etiqueta">Cajero(a)</span>
-            <input name="cajero" list="cajeros" defaultValue={Object.entries(r.porCajero).sort((a, b) => b[1] - a[1])[0]?.[0]} className="input" required />
+            <input name="cajero" list="cajeros" defaultValue={ini?.cajero ?? Object.entries(r.porCajero).sort((a, b) => b[1] - a[1])[0]?.[0]} className="input" required />
             <datalist id="cajeros">
               {cajeros.map((x) => (
                 <option key={x} value={x} />
@@ -139,11 +213,10 @@ function PasoCuadre({ turno, cajaNombre, cajeros, cuentas, categorias }: { turno
             </datalist>
           </label>
           <label>
-            <span className="etiqueta">Cantidad de trabajadores</span>
+            <span className="etiqueta">Cant. trabajadores</span>
             <input {...campo('trabajadores', { inputMode: 'numeric' })} />
           </label>
           <div className="text-xs text-muted-foreground">
-            Por cajero en el TPV:
             {Object.entries(r.porCajero).map(([k, x]) => (
               <div key={k}>
                 {k}: {f2(x)}
@@ -153,7 +226,17 @@ function PasoCuadre({ turno, cajaNombre, cajeros, cuentas, categorias }: { turno
         </div>
       </div>
 
-      <div className="grid gap-3 md:grid-cols-2">
+      <div className="mb-3 flex flex-wrap gap-1 border-b border-border">
+        {PESTANAS.map(([k, l]) => (
+          <button key={k} type="button" onClick={() => setPest(k)} className={`-mb-px border-b-2 px-3 py-2 text-sm ${pest === k ? 'border-primary font-semibold text-primary' : 'border-transparent text-muted-foreground'}`}>
+            {l}
+            {k === 'checklist' && pendientesCk > 0 && <span className="ml-1 rounded bg-amber-100 px-1 text-xs text-amber-900">{pendientesCk}</span>}
+          </button>
+        ))}
+      </div>
+
+      {/* Todas las pestañas se quedan montadas (ocultas) para que sus campos se envíen. */}
+      <div className={pest === 'cuadre' ? 'grid gap-3 md:grid-cols-2' : 'hidden'}>
         <div className="tarjeta p-4">
           <h3 className="mb-2 text-sm font-semibold">Ventas</h3>
           <Fila label="Venta en tienda (TPV)">
@@ -162,9 +245,6 @@ function PasoCuadre({ turno, cajaNombre, cajeros, cuentas, categorias }: { turno
           <div className="mb-2 text-right text-xs text-muted-foreground">
             Efectivo {f2(r.efectivo)}
             {Object.entries(r.noEfectivo).map(([k, x]) => ` · ${k} ${f2(x)}`)}
-            {Object.entries(r.efectivoPorMoneda)
-              .filter(([m]) => m !== 'CUP')
-              .map(([m, x]) => ` · cobrado en ${m}: ${f2(x ?? 0)}`)}
           </div>
           <Fila label="Venta a domicilio">
             <input {...campo('domicilio')} />
@@ -191,20 +271,19 @@ function PasoCuadre({ turno, cajaNombre, cajeros, cuentas, categorias }: { turno
           <button type="button" className="text-xs text-primary hover:underline" onClick={() => setGastos((xs) => [...xs, { concepto: '', importe: '', categoria: 'OTROS GASTOS' }])}>
             + otro gasto
           </button>
-          <Fila label={`Salario (sugerido ${f2(turno.salario)})`}>
+          <Fila label={`Salario propuesto (3 % = ${f2(turno.salario)})`}>
             <input {...campo('salario')} />
           </Fila>
 
-          <h3 className="mb-2 mt-4 text-sm font-semibold">Transferencias</h3>
-          {transf.map((x, i) => (
-            <div key={i} className="mb-1 grid grid-cols-[1fr_8rem] gap-1">
-              <input name="transf_cuenta" value={x.cuenta} onChange={(e) => setTransf((xs) => xs.map((y, k) => (k === i ? { ...y, cuenta: e.target.value } : y)))} className="input" />
-              <input name="transf_importe" value={x.importe} onChange={(e) => setTransf((xs) => xs.map((y, k) => (k === i ? { ...y, importe: e.target.value } : y)))} inputMode="decimal" className="input text-right" />
+          <h3 className="mb-1 mt-4 text-sm font-semibold">Total transferencias {f2(c.transferencias)}</h3>
+          {transferencias.map((t) => (
+            <div key={t.cuenta} className="flex justify-between text-sm">
+              <span>{t.cuenta}</span>
+              <span>{f2(t.importe)}</span>
             </div>
           ))}
-          <div className={`text-right text-xs ${transfDistinta ? 'text-danger' : 'text-muted-foreground'}`}>
-            Total {f2(c.transferencias)}
-            {transfDistinta && ` · el TPV dice ${f2(noEfectivo)} cobrados sin efectivo`}
+          <div className={`text-xs ${transfDistinta ? 'text-danger' : 'text-muted-foreground'}`}>
+            Se rellenan en «Venta por tarjeta».{transfDistinta && ` El TPV dice ${f2(noEfectivo)} cobrados sin efectivo.`}
           </div>
           <Fila label="Ventas por cobrar">
             <input {...campo('porCobrar')} />
@@ -212,15 +291,15 @@ function PasoCuadre({ turno, cajaNombre, cajeros, cuentas, categorias }: { turno
         </div>
 
         <div className="tarjeta p-4">
-          <h3 className="mb-2 text-sm font-semibold">Efectivo</h3>
-          {BILLETES_CUP.map((b) => (
-            <div key={b} className="mb-1 grid grid-cols-[4rem_6rem_1fr] items-center gap-2 text-sm">
+          <h3 className="mb-2 text-sm font-semibold">Total de efectivo</h3>
+          {BILLETES_CUP.filter((b) => b >= 5).map((b) => (
+            <div key={b} className="mb-1 grid grid-cols-[4.5rem_6rem_1fr] items-center gap-2 text-sm">
               <span className="text-right">{b} ×</span>
               <input {...campo(`b_${b}`, { inputMode: 'numeric', placeholder: '0', className: 'input text-center' })} />
               <span className="text-right text-xs text-muted-foreground">{num(v[`b_${b}`]) ? f2(num(v[`b_${b}`]) * b) : ''}</span>
             </div>
           ))}
-          <Fila label="Sueltos / monedas CUP">
+          <Fila label="Monedas y sueltos CUP">
             <input {...campo('sueltosCUP')} />
           </Fila>
           <Fila label="Total efectivo CUP">
@@ -238,7 +317,8 @@ function PasoCuadre({ turno, cajaNombre, cajeros, cuentas, categorias }: { turno
             <input {...campo('tasaEUR', { placeholder: 'tasa' })} />
             <span className="text-right">{f2(c.eurCUP)}</span>
           </div>
-          <Fila label="Otros (paquetes, vales…)">
+          <p className="mb-2 text-xs text-muted-foreground">Divisas a la tasa de la tienda (con la que vende el TPV); la diferencia con el Toque la registra la contabilidad.</p>
+          <Fila label="Otros (vales…)">
             <input {...campo('otros')} />
           </Fila>
           <Fila label="Fondo que queda en caja">
@@ -246,12 +326,117 @@ function PasoCuadre({ turno, cajaNombre, cajeros, cuentas, categorias }: { turno
           </Fila>
           <label className="mt-2 block">
             <span className="etiqueta">Observaciones</span>
-            <input name="observaciones" className="input" />
+            <input name="observaciones" defaultValue={ini?.observaciones} className="input" />
           </label>
         </div>
       </div>
 
-      <div className="tarjeta sticky bottom-2 mt-3 grid grid-cols-3 gap-2 p-3 text-center">
+      <div className={pest === 'tarjetas' ? 'tarjeta overflow-x-auto p-4' : 'hidden'}>
+        <h3 className="mb-2 text-sm font-semibold">Venta por tarjeta / transferencia</h3>
+        <div className="mb-1 grid min-w-[40rem] grid-cols-[7rem_1fr_7rem_9rem_1fr_2rem] gap-1 text-xs text-muted-foreground">
+          <span>Cuenta</span>
+          <span>Número de transferencia</span>
+          <span className="text-right">Importe</span>
+          <span>Carnet de identidad</span>
+          <span>Titular de la tarjeta</span>
+          <span />
+        </div>
+        {tarjetas.map((t, i) => {
+          const set = (k: keyof typeof t) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setTarjetas((xs) => xs.map((x, j) => (j === i ? { ...x, [k]: e.target.value } : x)))
+          return (
+            <div key={i} className="mb-1 grid min-w-[40rem] grid-cols-[7rem_1fr_7rem_9rem_1fr_2rem] gap-1">
+              <select name="tj_cuenta" value={t.cuenta} onChange={set('cuenta')} className="input text-xs">
+                {[...new Set([...cuentas, t.cuenta])].map((x) => (
+                  <option key={x}>{x}</option>
+                ))}
+              </select>
+              <input name="tj_numero" value={t.numero} onChange={set('numero')} className="input font-mono text-xs" autoCapitalize="characters" />
+              <input name="tj_importe" value={t.importe} onChange={set('importe')} inputMode="decimal" className="input text-right" />
+              <input name="tj_ci" value={t.ci} onChange={set('ci')} inputMode="numeric" className="input text-xs" />
+              <input name="tj_titular" value={t.titular} onChange={set('titular')} className="input text-xs" />
+              <button type="button" className="text-danger" aria-label="Quitar" onClick={() => setTarjetas((xs) => xs.filter((_, j) => j !== i))}>
+                ×
+              </button>
+            </div>
+          )
+        })}
+        <button type="button" className="text-xs text-primary hover:underline" onClick={() => setTarjetas((xs) => [...xs, { cuenta: xs.at(-1)?.cuenta ?? cuentas[0] ?? 'FISCAL', numero: '', importe: '', ci: '', titular: '' }])}>
+          + otra transferencia
+        </button>
+        <p className={`mt-2 text-sm ${transfDistinta ? 'text-danger' : ''}`}>
+          Total {f2(c.transferencias)} · el TPV registró {f2(noEfectivo)} sin efectivo.
+        </p>
+      </div>
+
+      <div className={pest === 'checklist' ? 'tarjeta p-4' : 'hidden'}>
+        <p className="mb-2 text-xs text-muted-foreground">Marca lo que quedó bien; escribe observación solo si hay problema.</p>
+        {CHECKLIST.map((sec) => (
+          <div key={sec.rol} className="mb-4">
+            <h3 className="text-sm font-semibold">{sec.titulo}</h3>
+            {sec.grupos.map((g) => (
+              <div key={g.titulo} className="mt-1">
+                <div className="text-xs font-semibold uppercase text-muted-foreground">{g.titulo}</div>
+                {g.items.map((it) => (
+                  <div key={it.id} className="grid grid-cols-[1.5rem_1fr_14rem] items-center gap-2 border-b border-border py-1 text-sm">
+                    <input type="checkbox" name={`ck_${it.id}`} checked={ck[it.id]?.ok ?? false} onChange={(e) => setCk((x) => ({ ...x, [it.id]: { ok: e.target.checked, obs: x[it.id]?.obs ?? '' } }))} />
+                    <span>{it.texto}</span>
+                    <input name={`obs_${it.id}`} value={ck[it.id]?.obs ?? ''} onChange={(e) => setCk((x) => ({ ...x, [it.id]: { ok: x[it.id]?.ok ?? false, obs: e.target.value } }))} placeholder="Observación" className="input py-1 text-xs" />
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+
+      <div className={pest === 'entrega' ? 'grid gap-3 md:grid-cols-2' : 'hidden'}>
+        <div className="tarjeta p-4">
+          <h3 className="mb-2 text-sm font-semibold">Energía</h3>
+          <Fila label="Carga del inversor (%)">
+            <input {...campo('inversor', { inputMode: 'numeric' })} />
+          </Fila>
+          <Fila label="Carga del EcoFlow (%)">
+            <input {...campo('ecoflow', { inputMode: 'numeric' })} />
+          </Fila>
+          <h3 className="mb-2 mt-4 text-sm font-semibold">Clientes que no salen en el TPV</h3>
+          <Fila label="Pax Compra">
+            <input {...campo('paxCompra', { inputMode: 'numeric' })} />
+          </Fila>
+          <Fila label="Pax Museo">
+            <input {...campo('paxMuseo', { inputMode: 'numeric' })} />
+          </Fila>
+          <h3 className="mb-2 mt-4 text-sm font-semibold">Fotos (inversor, tickets del TPV, hoja firmada)</h3>
+          <input type="file" accept="image/*" capture="environment" multiple onChange={(e) => void subirFotos(e.target.files)} className="text-sm" />
+          {subiendo && <p className="text-xs text-muted-foreground">{subiendo}</p>}
+          <div className="mt-2 flex flex-wrap gap-2">
+            {fotos.map((f) => (
+              <div key={f} className="relative">
+                <img src={`/api/foto?p=${encodeURIComponent(f)}`} alt="" className="h-20 w-20 rounded border border-border object-cover" />
+                <button type="button" className="absolute right-0 top-0 rounded bg-white px-1 text-xs text-danger" onClick={() => setFotos((x) => x.filter((y) => y !== f))}>
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="tarjeta p-4">
+          <h3 className="mb-2 text-sm font-semibold">Firmas del cambio de turno</h3>
+          <div className="mb-1 grid grid-cols-[6rem_1fr_1fr] gap-1 text-xs text-muted-foreground">
+            <span>Responsable</span>
+            <span>Entrega</span>
+            <span>Recibe</span>
+          </div>
+          {(['cajero', 'dependiente', 'seguridad'] as const).map((rol) => (
+            <div key={rol} className="mb-1 grid grid-cols-[6rem_1fr_1fr] items-center gap-1">
+              <span className="text-sm capitalize">{rol}</span>
+              <input name={`f_${rol}_entrega`} defaultValue={ini?.firmas?.[rol]?.entrega} className="input" placeholder="Nombre" />
+              <input name={`f_${rol}_recibe`} defaultValue={ini?.firmas?.[rol]?.recibe} className="input" placeholder="Nombre" />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="tarjeta sticky bottom-2 mt-3 grid grid-cols-4 gap-2 p-3 text-center">
         <div>
           <div className="text-xs text-muted-foreground">Efectivo esperado</div>
           <div className="font-semibold">{f2(c.esperado)}</div>
@@ -264,12 +449,43 @@ function PasoCuadre({ turno, cajaNombre, cajeros, cuentas, categorias }: { turno
           <div className="text-xs text-muted-foreground">Diferencia</div>
           <div className={`font-semibold ${c.diferencia < -0.5 ? 'text-danger' : c.diferencia > 0.5 ? 'text-amber-600' : 'text-accent'}`}>{Math.abs(c.diferencia) < 0.5 ? 'Cuadra' : f2(c.diferencia)}</div>
         </div>
-        <button className="btn btn-exito col-span-3" disabled={enviando}>
-          {enviando ? 'Guardando…' : 'Guardar cuadre y ver comprobante'}
+        <div>
+          <div className="text-xs text-muted-foreground">A entregar (− fondo)</div>
+          <div className="font-semibold">{f2(c.aEntregar)}</div>
+        </div>
+        <button className="btn btn-exito col-span-4" disabled={enviando}>
+          {enviando ? 'Guardando…' : ini ? 'Guardar corrección' : 'Guardar cierre'}
         </button>
-        {estado && !estado.ok && <p className="col-span-3 text-sm text-danger">{estado.error}</p>}
+        {estado && !estado.ok && <p className="col-span-4 text-sm text-danger">{estado.error}</p>}
       </div>
     </form>
+  )
+}
+
+/** Botones para mandar el cierre al grupo de WhatsApp (abre WhatsApp con el texto; se elige el grupo). */
+export function CompartirWhatsApp({ datos }: { datos: Parameters<typeof reporteWhatsApp>[0] }) {
+  const texto = reporteWhatsApp(datos)
+  const [copiado, setCopiado] = useState(false)
+  return (
+    <div className="tarjeta p-4">
+      <h3 className="mb-2 text-sm font-semibold">Reporte para el grupo de WhatsApp</h3>
+      <pre className="whitespace-pre-wrap rounded bg-muted p-3 text-sm">{texto}</pre>
+      <p className="mt-1 text-xs text-muted-foreground">Clientes en total: {totalPax(datos.pax, { compra: datos.paxCompra, museo: datos.paxMuseo })}</p>
+      <div className="mt-2 flex flex-wrap gap-2">
+        <a className="btn btn-exito" href={`https://wa.me/?text=${encodeURIComponent(texto)}`} target="_blank" rel="noreferrer">
+          Enviar por WhatsApp
+        </a>
+        <button
+          type="button"
+          className="btn"
+          onClick={() => {
+            void navigator.clipboard?.writeText(texto).then(() => setCopiado(true))
+          }}
+        >
+          {copiado ? 'Copiado' : 'Copiar texto'}
+        </button>
+      </div>
+    </div>
   )
 }
 

@@ -123,7 +123,7 @@ describe('conteo a ciegas', () => {
 import { calcularCuadre, horaCuba, resumenTurno, salarioSugerido } from '../lib/turno'
 
 describe('cuadre de cambio de turno', () => {
-  it('reproduce la hoja del 11/10 (César): esperado 148.250 y contado 153.065', () => {
+  it('reproduce la hoja del 11/10 (César): contado 153.065, sobran 5', () => {
     const c = calcularCuadre({
       ventaTienda: 160560,
       domicilio: 0,
@@ -150,7 +150,21 @@ describe('cuadre de cambio de turno', () => {
       otros: 20000,
     })
     expect(salarioSugerido(160560, 0.03)).toBe(4810)
-    expect(c).toMatchObject({ subtotal: 160560, esperado: 148250, billetesCUP: 129290, usdCUP: 3775, contado: 153065, diferencia: 4815 })
+    // El salario no se resta del esperado: se cobra del efectivo después de cuadrar.
+    expect(c).toMatchObject({ subtotal: 160560, esperado: 153060, billetesCUP: 129290, usdCUP: 3775, contado: 153065, diferencia: 5, aEntregar: 153065 })
+  })
+
+  it('reproduce la hoja del 13/10 (noche, KM 26): contado 154.510, sobran 10', () => {
+    const c = calcularCuadre({
+      ventaTienda: 158000, domicilio: 0, plataforma: 0,
+      gastos: [{ concepto: 'Seguridad', importe: 3500 }],
+      salario: salarioSugerido(158000, 0.03),
+      transferencias: [], porCobrar: 0,
+      billetes: [{ valor: 5000, cantidad: 8 }, { valor: 2000, cantidad: 4 }, { valor: 1000, cantidad: 8 }, { valor: 500, cantidad: 21 }, { valor: 100, cantidad: 5 }, { valor: 50, cantidad: 10 }],
+      sueltosCUP: 0, usd: 113, tasaUSD: 770, eur: 0, tasaEUR: 0, otros: 0,
+    })
+    expect(salarioSugerido(158000, 0.03)).toBe(4740)
+    expect(c).toMatchObject({ totalCUP: 67500, usdCUP: 87010, contado: 154510, esperado: 154500, diferencia: 10 })
   })
 
   it('suma solo los tickets de la caja dentro del turno, por moneda y por cajero', () => {
@@ -209,5 +223,54 @@ describe('casar productos del Excel con el TPV', () => {
     expect(de('GEL DE BANO ORCHID').candidatos[0].codigo).toBe('2')
     expect(de('CHAMPU VOLUMEN SIMPLY BODYCARE')).toMatchObject({ seguro: false, uso: 9 })
     expect(r[0].seguro).toBe(true)
+  })
+})
+
+import { reporteWhatsApp, tramosDe, turnoDeHora } from '../lib/turno'
+
+describe('reporte de turno para WhatsApp', () => {
+  it('parte la noche a las 2 am y cuenta los Pax del TPV (reporte de Kevin, KM 26)', () => {
+    const op = (h: string, monto: number, pax: [string, number][]) => ({ OperType: 2, Date: h.slice(0, 10), DateIssued: h, UserCode: '9', Payments: [{ PaymentMethod: '1', AmountTotal: monto }], Items: pax.map(([n, q]) => ({ ItemName: n, Category: 'ESTADISTICA', Qtty: q })) })
+    const r = resumenTurno([op('2026-10-12T21:00:00', 100000, [['PAX A', 10]]), op('2026-10-13T01:30:00', 46400, [['PAX A', 8], ['PAX C', 1]]), op('2026-10-13T04:00:00', 11600, [['PAX A', 5]])], '2026-10-12T20:00:00', '2026-10-13T08:00:00', new Map([['9', 'KEVIN']]), ['02:00'])
+    expect(r.tramos.map((t) => [t.venta, t.pax['PAX A'] ?? 0])).toEqual([[146400, 18], [11600, 5]])
+    expect(r.pax).toEqual({ 'PAX A': 23, 'PAX C': 1 })
+    const txt = reporteWhatsApp({ tienda: 'KM 26', turno: turnoDeHora('2026-10-13T08:00:00'), desde: '2026-10-12T20:00:00', hasta: '2026-10-13T08:00:00', cajero: 'Kevin', venta: r.venta, pax: r.pax, tramos: r.tramos, inversor: 70 })
+    expect(txt).toContain('*KM 26* · Fecha: 12/10/2026 noche')
+    expect(txt).toContain('Venta total: 158 000')
+    expect(txt).toContain('De 8pm a 2am\nVenta: 146 400\nPax A: 18\nPax B: 0\nPax C: 1')
+    expect(txt).toContain('De 2am a 8am\nVenta: 11 600\nPax A: 5')
+    expect(txt).toContain('Trabajador: Kevin')
+    expect(txt).toContain('inversor 70 %')
+  })
+
+  it('tramos y turno', () => {
+    expect(tramosDe('2026-10-13T08:00:00', '2026-10-13T20:00:00', ['02:00'])).toHaveLength(1)
+    expect(turnoDeHora('2026-10-13T20:05:00')).toBe('dia')
+  })
+})
+
+import { cuentasTrabajadores, faltanteConteo, inventarioRevisado, nombreTrabajador } from '../lib/nomina'
+
+describe('pagos al personal', () => {
+  const ap = (tipo: 'devengo' | 'descuento' | 'pago', importe: number, extra = {}) => ({ id: Math.random().toString(), trabajador: 'KEVIN', tienda: 'km26', fecha: '2026-10-13', tipo, importe, concepto: tipo, usuario: 'x', ts: '', ...extra })
+  it('por pagar = devengado − descuentos − pagado; un faltante posterior baja lo pendiente', () => {
+    const [c] = cuentasTrabajadores([ap('devengo', 4740, { cierre: 'a' }), ap('devengo', 4810, { cierre: 'b' }), ap('pago', 4740), ap('descuento', 1200, { conteo: 'k' })])
+    expect(c).toMatchObject({ trabajador: 'KEVIN', turnos: 2, devengado: 9550, descuentos: 1200, pagado: 4740, porPagar: 3610 })
+    expect(nombreTrabajador('  kevin  marcelo ')).toBe('KEVIN MARCELO')
+  })
+
+  it('inventario revisado si hay un conteo cerrado de la tienda después del turno', () => {
+    const conteo = { id: 'k', numero: 1, tienda: 'km26', fecha: '2026-10-13', usuario: 'x', estado: 'cerrado' as const, inicio: '2026-10-13T13:30:00.000Z', lineas: [] }
+    expect(inventarioRevisado({ tienda: 'km26', hasta: '2026-10-13T08:00:00' }, [conteo])).toBe(true)
+    expect(inventarioRevisado({ tienda: 'km26', hasta: '2026-10-13T20:00:00' }, [conteo])).toBe(false)
+    expect(inventarioRevisado({ tienda: 'km12', hasta: '2026-10-13T08:00:00' }, [conteo])).toBe(false)
+  })
+
+  it('faltante de un conteo a costo (solo diferencias negativas)', () => {
+    const c = { id: 'k', numero: 1, tienda: 'km26', fecha: '', usuario: '', estado: 'cerrado' as const, inicio: '', lineas: [], resultado: [
+      { codigo: '1', nombre: 'A', contado: 8, sistema: 10, diferencia: -2 },
+      { codigo: '2', nombre: 'B', contado: 5, sistema: 4, diferencia: 1 },
+    ] }
+    expect(faltanteConteo(c, (cod) => (cod === '1' ? 600 : 100))).toBe(1200)
   })
 })
