@@ -92,3 +92,4 @@ export async function transaccionesSquare(desde: string, hasta: string): Promise
   filas.sort((a, b) => String(a[0]).localeCompare(String(b[0])))
   return { encabezados: ENCABEZADOS_SQUARE, filas }
 }
+

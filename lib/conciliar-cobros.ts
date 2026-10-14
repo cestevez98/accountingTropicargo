@@ -71,3 +71,46 @@ export function conciliarCobros(pagos: PagoTP[], cobros: CobroCaja[], tolerancia
     }) as GrupoCobro)
     .sort((a, b) => a.fecha.localeCompare(b.fecha))
 }
+
+/**
+ * Cobros sin nota que pagan facturas de Tracking Premium (links generales de pago): se emparejan con los pagos
+ * «Square» de Tracking Premium por importe —exacto o con el recargo de tarjeta de 2,5–4,5 %—, primero los del mismo
+ * cliente (nombre en el correo) y luego los del mismo día. Devuelve, por id de pago de Square, las facturas que paga.
+ */
+export function emparejarSinNota(
+  sinNota: { id: string; fecha: string; importe: number; email: string }[],
+  pagos: PagoTP[],
+): Map<string, string[]> {
+  const cuadra = (a: number, s: number) => Math.abs(a - s) < 0.02 || (a >= 1.025 * s - 0.02 && a <= 1.045 * s + 0.02)
+  const dias = (a: string, b: string) => (Date.parse(a) - Date.parse(b)) / 86400000
+  const usados = new Set<number>()
+  const out = new Map<string, string[]>()
+  const nombre = (p: PagoTP) => p.cliente.toLowerCase().match(/[a-záéíóúñ]{3,}/g) ?? []
+  const combinar = (cand: PagoTP[], a: number): PagoTP[] | null => {
+    for (let n = 1; n <= Math.min(5, cand.length); n++) {
+      const idx = Array.from({ length: n }, (_, i) => i)
+      while (true) {
+        const comb = idx.map((i) => cand[i])
+        if (cuadra(a, comb.reduce((t, p) => t + p.monto, 0))) return comb
+        let i = n - 1
+        while (i >= 0 && idx[i] === cand.length - n + i) i--
+        if (i < 0) break
+        idx[i]++
+        for (let j = i + 1; j < n; j++) idx[j] = idx[j - 1] + 1
+      }
+    }
+    return null
+  }
+  for (const pasada of ['cliente', 'dia'] as const) {
+    for (const c of sinNota) {
+      if (out.has(c.id)) continue
+      let cand = pagos.filter((p) => !usados.has(p.id) && dias(c.fecha, p.fecha) >= -1 && dias(c.fecha, p.fecha) <= 3)
+      cand = pasada === 'cliente' ? (c.email ? cand.filter((p) => nombre(p).some((w) => c.email.includes(w))) : []) : cand.filter((p) => Math.abs(dias(c.fecha, p.fecha)) <= 1).slice(0, 12)
+      const hit = combinar(cand, c.importe)
+      if (!hit) continue
+      hit.forEach((p) => usados.add(p.id))
+      out.set(c.id, [...new Set(hit.flatMap((p) => p.refs))])
+    }
+  }
+  return out
+}

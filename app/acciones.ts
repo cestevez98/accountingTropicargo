@@ -850,6 +850,22 @@ export async function traerSquare(desde: string, hasta: string): Promise<{ ok: t
     const { transaccionesSquare } = await import('@/lib/square')
     const { cargarDataset } = await import('@/lib/data')
     const [tabla, ds] = await Promise.all([transaccionesSquare(desde, hasta), cargarDataset()])
+    // Links generales: cobros sin nota que pagan facturas de Tracking Premium.
+    const { tpConfigurado, pagosTP } = await import('@/lib/trackingpremium')
+    if (tpConfigurado()) {
+      const { emparejarSinNota } = await import('@/lib/conciliar-cobros')
+      const conNota = new Set(tabla.filas.flatMap((f) => String(f[2]).toUpperCase().match(/INV\d+/g) ?? []))
+      const desdeTP = new Date(Date.parse(`${desde}T00:00:00Z`) - 4 * 86400000).toISOString().slice(0, 10)
+      const pagos = (await pagosTP(desdeTP, hasta)).filter((p) => p.tipo === 'Square' && !p.refs.some((r) => conNota.has(r)))
+      const sinNota = tabla.filas
+        .filter((f) => String(f[1]).includes('Venta Square sin nota'))
+        .map((f) => ({ id: String(f[5]), fecha: String(f[0]), importe: Number(f[3]), email: String(f[1]).match(/\S+@\S+/)?.[0]?.toLowerCase() ?? '' }))
+      const pares = emparejarSinNota(sinNota, pagos)
+      for (const f of tabla.filas) {
+        const refs = pares.get(String(f[5]))
+        if (refs) f[1] = String(f[1]).replace('Venta Square sin nota', `${refs.join(', ')} Pago Square (link general)`)
+      }
+    }
     for (const m of ds.movimientos) {
       if (m.cuenta !== 'Truist' || m.fecha < desde || m.fecha > hasta || !/square\s+inc/i.test(m.concepto) || !(m.entrada > m.salida)) continue
       tabla.filas.push([m.fecha, `Transferencia a Truist · ${m.concepto}`, 'Sale del saldo de Square (según el extracto de Truist)', -(m.entrada - m.salida), 'USD', `truist-${m.id}`])

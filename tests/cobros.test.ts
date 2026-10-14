@@ -21,3 +21,16 @@ describe('conciliarCobros', () => {
     expect(por).toEqual({ P1: 'solo_tp', P2: 'difiere', P3: 'solo_tp', b: 'solo_caja', c: 'solo_caja' })
   })
 })
+
+describe('emparejarSinNota (links generales de Square)', () => {
+  it('reconoce un cobro que paga varias facturas con el recargo de tarjeta', async () => {
+    const { emparejarSinNota } = await import('../lib/conciliar-cobros')
+    const pagos = [
+      { ...pago(1, ['INV10'], 100, '2026-10-01'), cliente: 'Ana Perez', tipo: 'Square' },
+      { ...pago(2, ['INV11'], 50, '2026-10-01'), cliente: 'Ana Perez', tipo: 'Square' },
+      { ...pago(3, ['INV12'], 80, '2026-10-01'), cliente: 'Luis Gomez', tipo: 'Square' },
+    ]
+    const r = emparejarSinNota([{ id: 'sq1', fecha: '2026-10-01', importe: 155.25, email: 'anaperez@x.com' }], pagos)
+    expect(r.get('sq1')).toEqual(['INV10', 'INV11'])
+  })
+})
