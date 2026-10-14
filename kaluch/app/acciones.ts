@@ -12,7 +12,7 @@ import { esEntrega, GRUPOS_PRECIO, movimientosEntrega, productoDesdeItem } from 
 import { resultadoConteo } from '@/lib/conteo'
 import { nombreTrabajador } from '@/lib/nomina'
 import { esDelTPV, propuestasCasar } from '@/lib/casar'
-import { BILLETES_CUP, calcularCuadre, horaCuba, ITEMS_CHECKLIST, porCuenta, resumenTurno, salarioSugerido, turnoDeHora, type ResumenTurno } from '@/lib/turno'
+import { BILLETES_CUP, calcularCuadre, horaCuba, ITEMS_CHECKLIST, pagadoEnTurno, porCuenta, resumenTurno, salarioSugerido, totalSalarios, turnoDeHora, type ResumenTurno } from '@/lib/turno'
 import { DEFAULT_SETTINGS } from '@/lib/catalogo'
 import { cargarDataset, leerUsuarios, registrarAuditoria } from '@/lib/data'
 import { COLECCIONES_OPERATIVAS, DEFECTOS } from '@/lib/defectos'
@@ -1125,7 +1125,20 @@ export async function accionArqueo(_prev: (Resultado & { id?: string }) | null, 
       if (entrega || recibe) firmas[r] = { entrega: entrega || undefined, recibe: recibe || undefined }
     }
     const fotos = form.getAll('fotos').map(String).filter((f) => f.startsWith('fotos/')).slice(0, 12)
-    const c = calcularCuadre(datos)
+    const roles = form.getAll('p_rol').map(String)
+    const personal: NonNullable<Arqueo['personal']> = roles
+      .map((rol, i) => ({
+        rol: (['cajero', 'dependiente', 'seguridad'].includes(rol) ? rol : 'dependiente') as 'cajero' | 'dependiente' | 'seguridad',
+        nombre: nombreTrabajador(String(form.getAll('p_nombre')[i] ?? '')),
+        salario: Number(String(form.getAll('p_salario')[i] ?? '').replace(/\s/g, '').replace(',', '.')) || 0,
+        pagadoEnTurno: String(form.getAll('p_pagado')[i] ?? '') === '1',
+      }))
+      .filter((p) => p.nombre || p.salario)
+    if (personal.length) {
+      datos.salario = totalSalarios(personal)
+      if (personal.some((p) => p.salario && !p.nombre)) throw new Error('Falta el nombre de alguien del personal del turno.')
+    }
+    const c = calcularCuadre({ ...datos, pagadoTurno: pagadoEnTurno(personal) })
     const id = previo?.id ?? uid()
     const ahora = new Date().toISOString()
     let num = previo?.numero ?? 0
@@ -1150,13 +1163,14 @@ export async function accionArqueo(_prev: (Resultado & { id?: string }) | null, 
         usuario: previo?.usuario ?? s.email,
         nombreUsuario: previo?.nombreUsuario ?? s.nombre,
         turno,
-        cajero: str(form, 'cajero') || undefined,
-        trabajadores: Math.max(1, Math.round(n('trabajadores')) || 1),
+        cajero: personal.find((p) => p.rol === 'cajero')?.nombre || str(form, 'cajero') || undefined,
+        trabajadores: personal.length || Math.max(1, Math.round(n('trabajadores')) || 1),
         tpv,
         paxCompra: nOpc('paxCompra'),
         paxMuseo: nOpc('paxMuseo'),
         ...datos,
         tarjetas,
+        personal,
         esperado: c.esperado,
         contado: c.contado,
         diferencia: c.diferencia,
@@ -1197,16 +1211,29 @@ export async function accionArqueoAprobar(_prev: Resultado | null, form: FormDat
     const matriz = ds.tiendas.find((x) => x.tipo === 'matriz')
     const base = { libro: 'caja' as const, fecha: a.fecha, tienda: a.tienda, moneda: 'CUP' as const, tipo: 'Salida' as const, origen: 'manual' as const, comprobante: `CT-${a.numero}`, cajero: a.cajero }
     const movs: Movimiento[] = a.gastos.map((g) => ({ ...base, id: uid(), categoria: g.categoria || 'OTROS GASTOS', concepto: `${g.concepto} · cierre #${a.numero}`, monto: g.importe }))
-    // El salario no sale de la caja: se devenga en la cuenta del trabajador y se paga en «Pagos al personal».
-    const trabajador = nombreTrabajador(str(form, 'trabajador') || a.cajero || '')
-    const salario = numero(form, 'salario', false) ?? a.salario
+    // Cada persona del turno devenga su salario en su cuenta («Pagos al personal»). Lo que ya se cobró de la
+    // caja en el turno (la seguridad) queda además pagado, con su salida de caja.
     const ahora = new Date().toISOString()
+    const turnoTxt = `Turno ${a.turno === 'noche' ? 'noche' : 'día'} ${a.fecha} · cierre #${a.numero}`
+    const personal: NonNullable<Arqueo['personal']> = (a.personal?.length ? a.personal : [{ rol: 'cajero' as const, nombre: a.cajero ?? '', salario: a.salario, pagadoEnTurno: false }]).map((p, i) => ({
+      ...p,
+      nombre: nombreTrabajador(String(form.getAll('ap_nombre')[i] ?? p.nombre)),
+      salario: Number(String(form.getAll('ap_salario')[i] ?? p.salario).replace(/\s/g, '').replace(',', '.')) || 0,
+    }))
     const apuntes: ApunteNomina[] = []
-    if (salario > 0) {
-      if (!trabajador) throw new Error('Falta el nombre del trabajador que cobra el turno.')
-      apuntes.push({ id: uid(), trabajador, tienda: a.tienda, fecha: a.fecha, tipo: 'devengo', importe: salario, concepto: `Turno ${a.turno === 'noche' ? 'noche' : 'día'} ${a.fecha} · cierre #${a.numero}`, cierre: a.id, usuario: s.email, ts: ahora })
+    for (const p of personal) {
+      if (!p.salario) continue
+      if (!p.nombre) throw new Error(`Falta el nombre del ${p.rol} del turno.`)
+      apuntes.push({ id: uid(), trabajador: p.nombre, tienda: a.tienda, fecha: a.fecha, tipo: 'devengo', importe: p.salario, concepto: `${turnoTxt} (${p.rol})`, cierre: a.id, usuario: s.email, ts: ahora })
+      if (p.pagadoEnTurno) {
+        const mov: Movimiento = { ...base, id: uid(), categoria: p.rol === 'seguridad' ? 'SALARIO SEGURIDAD' : 'SALARIO DEPENDIENTE', concepto: `Salario ${p.nombre} (${p.rol}) · cierre #${a.numero}`, monto: p.salario }
+        movs.push(mov)
+        apuntes.push({ id: uid(), trabajador: p.nombre, tienda: a.tienda, fecha: a.fecha, tipo: 'pago', importe: p.salario, concepto: `Cobrado de la caja en el turno · cierre #${a.numero}`, cierre: a.id, movimiento: mov.id, usuario: s.email, ts: ahora })
+      }
     }
+    const salario = totalSalarios(personal)
     const faltante = numero(form, 'faltante', false) ?? 0
+    const trabajador = nombreTrabajador(str(form, 'faltanteA') || personal.find((p) => p.rol === 'cajero')?.nombre || '')
     if (faltante > 0) {
       if (!trabajador) throw new Error('Falta el nombre del trabajador al que se descuenta.')
       apuntes.push({ id: uid(), trabajador, tienda: a.tienda, fecha: a.fecha, tipo: 'descuento', importe: faltante, concepto: `Faltante de caja · cierre #${a.numero}`, cierre: a.id, usuario: s.email, ts: ahora })
@@ -1223,12 +1250,12 @@ export async function accionArqueoAprobar(_prev: Resultado | null, form: FormDat
       return {
         movimientos: [...x.movimientos, ...movs],
         nomina: [...x.nomina, ...apuntes],
-        arqueos: x.arqueos.map((y) => (y.id === a.id ? { ...y, salario, estado: 'aprobado' as const, revisadoPor: s.nombre ?? s.email, revisadoEn: ahora, movimientos: movs.map((m) => m.id) } : y)),
+        arqueos: x.arqueos.map((y) => (y.id === a.id ? { ...y, salario, personal, estado: 'aprobado' as const, revisadoPor: s.nombre ?? s.email, revisadoEn: ahora, movimientos: movs.map((m) => m.id) } : y)),
       }
     })
-    await registrarAuditoria([{ usuario: s.email, accion: 'aprobar cierre de turno', coleccion: 'arqueos', ref: `#${a.numero}`, detalle: `${movs.length} movimientos de caja; ${trabajador}: devengo ${salario}${faltante ? `, descuento ${faltante}` : ''}` }])
+    await registrarAuditoria([{ usuario: s.email, accion: 'aprobar cierre de turno', coleccion: 'arqueos', ref: `#${a.numero}`, detalle: `${movs.length} movimientos de caja; salarios ${personal.map((p) => `${p.nombre} ${p.salario}`).join(', ')}${faltante ? `; descuento ${faltante} a ${trabajador}` : ''}` }])
     refrescar()
-    return { ok: true, mensaje: `Cierre #${a.numero} aprobado: ${movs.length} movimientos en caja; ${salario ? `${salario} CUP a pagar a ${trabajador}` : 'sin salario'}${faltante ? ` (descuento de ${faltante} por faltante)` : ''}.` }
+    return { ok: true, mensaje: `Cierre #${a.numero} aprobado: ${movs.length} movimientos en caja; salarios ${salario} CUP en las cuentas del personal${faltante ? ` (descuento de ${faltante} a ${trabajador})` : ''}.` }
   } catch (e) {
     return fallo(e)
   }

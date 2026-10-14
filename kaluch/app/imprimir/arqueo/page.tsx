@@ -74,7 +74,10 @@ export default async function ComprobanteCuadre({ searchParams }: { searchParams
             {a.gastos.map((g, i) => (
               <Fila key={i} label={g.concepto} valor={f2(g.importe)} />
             ))}
-            <Fila label="Salario" valor={f2(a.salario)} />
+            <Fila label={<b>Personal del turno</b>} valor={f2(a.salario)} />
+            {(a.personal ?? []).map((p, i) => (
+              <Fila key={i} label={`${p.rol === 'cajero' ? 'Cajero(a)' : p.rol === 'dependiente' ? 'Dependiente' : 'Seguridad'}: ${p.nombre}${p.pagadoEnTurno ? ' (cobrado en el turno)' : ''}`} valor={f2(p.salario)} />
+            ))}
             <Fila label="Cant. trabajadores" valor={a.trabajadores} />
             <Fila label={<b>Total transferencias</b>} valor={f2(a.transferencias.reduce((x, t) => x + t.importe, 0))} />
             {a.transferencias.map((t, i) => (
@@ -99,10 +102,10 @@ export default async function ComprobanteCuadre({ searchParams }: { searchParams
       </div>
       <table className="mt-3 w-full border-2 border-black text-sm">
         <tbody>
-          <Fila label="Efectivo esperado (subtotal − transferencias − por cobrar − otros gastos)" valor={f2(a.esperado)} />
+          <Fila label="Efectivo esperado (subtotal − transferencias − por cobrar − otros gastos − salarios cobrados en el turno)" valor={f2(a.esperado)} />
           <Fila label="Total de efectivo" valor={f2(a.contado)} fuerte />
           <Fila label="Diferencia" valor={Math.abs(a.diferencia) < 0.5 ? 'Cuadra' : `${a.diferencia > 0 ? 'Sobrante +' : 'Faltante '}${f2(a.diferencia)}`} fuerte />
-          <Fila label={a.estado === 'aprobado' ? 'Salario aprobado (se paga en «Pagos al personal»)' : 'Salario propuesto (lo decide el contador)'} valor={f2(a.salario)} />
+          <Fila label={a.estado === 'aprobado' ? 'Salarios aprobados (se pagan en «Pagos al personal»)' : 'Salarios propuestos (los decide el contador)'} valor={f2(a.salario)} />
           <Fila label="A entregar a la caja central (efectivo − fondo)" valor={f2(a.contado - a.fondo)} fuerte />
         </tbody>
       </table>

@@ -7,7 +7,7 @@ import { params, type SP } from '@/lib/pagina'
 import { revisaArqueos } from '@/lib/permisos'
 import { inventarioRevisado } from '@/lib/nomina'
 import { CompartirWhatsApp, FormArqueo, HojaCierre, turnoDeCierre } from './FormArqueo'
-import { CHECKLIST, ITEMS_CHECKLIST, TURNO_LABEL } from '@/lib/turno'
+import { CHECKLIST, ITEMS_CHECKLIST, ROL_TURNO_LABEL, TURNO_LABEL } from '@/lib/turno'
 import type { Arqueo, Dataset } from '@/lib/types'
 
 const f2 = (n: number) => n.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -142,6 +142,8 @@ export default async function PaginaArqueo({ searchParams }: { searchParams: SP 
   )
 }
 
+const personalDe = (a: Arqueo) => (a.personal?.length ? a.personal : [{ rol: 'cajero' as const, nombre: a.cajero ?? '', salario: a.salario, pagadoEnTurno: false }])
+
 function Detalle({ a, ds, revisa, puedeEditar }: { a: Arqueo; ds: Dataset; revisa: boolean; puedeEditar: boolean }) {
   const tienda = ds.tiendas.find((t) => t.id === a.tienda)?.nombre ?? a.tienda
   const problemas = ITEMS_CHECKLIST.filter((i) => a.checklist && (!a.checklist[i.id]?.ok || a.checklist[i.id]?.obs)).map((i) => `${i.texto}${a.checklist?.[i.id]?.obs ? ` — ${a.checklist[i.id].obs}` : ' (sin marcar)'}`)
@@ -168,7 +170,7 @@ function Detalle({ a, ds, revisa, puedeEditar }: { a: Arqueo; ds: Dataset; revis
             turno: a.turno ?? 'dia',
             desde: a.desde,
             hasta: a.hasta,
-            cajero: a.cajero,
+            cajero: personalDe(a).filter((p) => p.rol !== 'seguridad' && p.nombre).map((p) => p.nombre).join(' y ') || a.cajero,
             venta: a.ventaTienda + a.domicilio + a.plataforma,
             pax: a.tpv.pax ?? {},
             paxCompra: a.paxCompra,
@@ -193,8 +195,14 @@ function Detalle({ a, ds, revisa, puedeEditar }: { a: Arqueo; ds: Dataset; revis
             <span className="text-right font-semibold">{f2(a.contado)}</span>
             <span>Diferencia</span>
             <span className={`text-right font-semibold ${a.diferencia < -0.5 ? 'text-danger' : a.diferencia > 0.5 ? 'text-amber-600' : 'text-accent'}`}>{Math.abs(a.diferencia) < 0.5 ? 'Cuadra' : f2(a.diferencia)}</span>
-            <span>Salario {a.estado === 'aprobado' ? 'aprobado' : 'propuesto'}</span>
-            <span className="text-right">{f2(a.salario)}</span>
+            {personalDe(a).map((p, i) => (
+              <span key={i} className="col-span-2 flex justify-between text-xs">
+                <span>
+                  {ROL_TURNO_LABEL[p.rol]}: {p.nombre || '—'} {p.pagadoEnTurno ? '(cobrado en el turno)' : ''}
+                </span>
+                <span>{f2(p.salario)}</span>
+              </span>
+            ))}
             <span>A entregar a la caja central</span>
             <span className="text-right">{f2(a.contado - a.fondo)}</span>
           </div>
@@ -213,18 +221,29 @@ function Detalle({ a, ds, revisa, puedeEditar }: { a: Arqueo; ds: Dataset; revis
               <h3 className="mb-2 font-semibold">Revisión del contador</h3>
               <FormAccion accion={accionArqueoAprobar} boton="Aprobar y registrar" claseBoton="btn btn-exito mt-2" confirmar={`¿Aprobar el cierre #${a.numero}?`} limpiar={false}>
                 <input type="hidden" name="id" value={a.id} />
-                <div className="grid gap-2 sm:grid-cols-3">
+                <div className="mb-2 text-xs font-semibold">Salario de cada uno (se suma a su cuenta)</div>
+                {personalDe(a).map((p, i) => (
+                  <div key={i} className="mb-1 grid grid-cols-[6rem_1fr_7rem_5rem] items-center gap-2">
+                    <span className="text-xs">{ROL_TURNO_LABEL[p.rol]}</span>
+                    <input name="ap_nombre" defaultValue={p.nombre} className="input" />
+                    <input name="ap_salario" defaultValue={p.salario} inputMode="decimal" className="input text-right" />
+                    <span className="text-xs text-muted-foreground">{p.pagadoEnTurno ? 'ya cobrado' : 'por pagar'}</span>
+                  </div>
+                ))}
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
                   <label>
-                    <span className="etiqueta">Trabajador que cobra</span>
-                    <input name="trabajador" defaultValue={a.cajero} className="input" required />
-                  </label>
-                  <label>
-                    <span className="etiqueta">Salario a pagar (CUP)</span>
-                    <input name="salario" defaultValue={a.salario} inputMode="decimal" className="input text-right" />
-                  </label>
-                  <label>
-                    <span className="etiqueta">Descontar faltante de caja</span>
+                    <span className="etiqueta">Descontar faltante de caja (CUP)</span>
                     <input name="faltante" defaultValue={a.diferencia < -0.5 ? Math.round(-a.diferencia * 100) / 100 : ''} inputMode="decimal" className="input text-right" placeholder="0" />
+                  </label>
+                  <label>
+                    <span className="etiqueta">A quién</span>
+                    <select name="faltanteA" defaultValue={personalDe(a).find((p) => p.rol === 'cajero')?.nombre} className="input">
+                      {personalDe(a)
+                        .filter((p) => p.nombre && p.rol !== 'seguridad')
+                        .map((p) => (
+                          <option key={p.nombre}>{p.nombre}</option>
+                        ))}
+                    </select>
                   </label>
                 </div>
                 <label className="mt-2 inline-flex items-center gap-1 text-xs">

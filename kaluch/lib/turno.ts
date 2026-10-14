@@ -149,13 +149,15 @@ export interface DatosCuadre {
   /** Otros importes en CUP contados aparte (vales…). */
   otros: number
   fondo?: number
+  /** Salarios pagados de la caja en el mismo turno (la seguridad): se restan del esperado como un gasto. */
+  pagadoTurno?: number
 }
 
 export function calcularCuadre(d: DatosCuadre) {
   const subtotal = r2(d.ventaTienda + d.domicilio + d.plataforma)
   const gastos = r2(d.gastos.reduce((s, g) => s + g.importe, 0))
   const transferencias = r2(d.transferencias.reduce((s, t) => s + t.importe, 0))
-  const esperado = r2(subtotal - transferencias - d.porCobrar - gastos)
+  const esperado = r2(subtotal - transferencias - d.porCobrar - gastos - (d.pagadoTurno ?? 0))
   const billetesCUP = r2(d.billetes.reduce((s, b) => s + b.valor * b.cantidad, 0))
   const totalCUP = r2(billetesCUP + d.sueltosCUP)
   const usdCUP = r2(d.usd * d.tasaUSD)
@@ -257,3 +259,38 @@ export function reporteWhatsApp(c: {
   if (c.incidencias?.length) l.push('', 'Incidencias:', ...c.incidencias.map((x) => `- ${x}`))
   return l.join('\n')
 }
+
+// ---------------------------------------------------------------- personal del turno
+
+export type RolTurno = 'cajero' | 'dependiente' | 'seguridad'
+export const ROL_TURNO_LABEL: Record<RolTurno, string> = { cajero: 'Cajero(a)', dependiente: 'Dependiente', seguridad: 'Seguridad' }
+
+export interface PersonaTurno {
+  rol: RolTurno
+  nombre: string
+  salario: number
+  /** Cobrado de la caja al terminar el turno (la seguridad): se resta del esperado y queda pagado. */
+  pagadoEnTurno: boolean
+}
+
+/** Salarios de las tiendas: de día cajero y dependiente 1,5 % cada uno; de noche el cajero solo 3 %; la seguridad, fijo. */
+export interface ReglasSalario {
+  dia: Partial<Record<RolTurno, number>>
+  noche: Partial<Record<RolTurno, number>>
+  /** Importes fijos de la seguridad (el primero es el que se propone). */
+  seguridad: number[]
+}
+
+export const REGLAS_SALARIO: ReglasSalario = { dia: { cajero: 0.015, dependiente: 0.015 }, noche: { cajero: 0.03 }, seguridad: [2500, 3500] }
+
+/** Personal propuesto para un turno: los porcentajes de la venta (redondeados a decenas) y la seguridad fija. */
+export function personalPorDefecto(turno: 'dia' | 'noche', venta: number, cajero = '', reglas: ReglasSalario = REGLAS_SALARIO): PersonaTurno[] {
+  const pct = reglas[turno]
+  const out: PersonaTurno[] = []
+  for (const rol of ['cajero', 'dependiente'] as const) if (pct[rol]) out.push({ rol, nombre: rol === 'cajero' ? cajero : '', salario: salarioSugerido(venta, pct[rol]!), pagadoEnTurno: false })
+  out.push({ rol: 'seguridad', nombre: '', salario: reglas.seguridad[0] ?? 0, pagadoEnTurno: true })
+  return out
+}
+
+export const totalSalarios = (p: PersonaTurno[]) => r2(p.reduce((s, x) => s + x.salario, 0))
+export const pagadoEnTurno = (p: PersonaTurno[]) => r2(p.filter((x) => x.pagadoEnTurno).reduce((s, x) => s + x.salario, 0))

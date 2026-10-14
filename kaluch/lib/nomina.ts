@@ -51,7 +51,7 @@ function isoUTC(local: string) {
   return new Date(d.getTime() + desfase * 3600000).toISOString()
 }
 
-/** Faltante valorado de un conteo (CUP): solo las diferencias negativas, a costo. */
+/** Faltante valorado de un conteo (CUP): solo las diferencias negativas, al precio que se le pase (de venta). */
 export function faltanteConteo(c: Conteo, costoCUP: (codigo: string, costoUSD?: number) => number) {
   return r2((c.resultado ?? []).filter((r) => r.diferencia < 0).reduce((s, r) => s + -r.diferencia * costoCUP(r.codigo, r.costoUSD), 0))
 }

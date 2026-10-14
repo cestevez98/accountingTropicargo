@@ -3,7 +3,7 @@
 import { upload } from '@vercel/blob/client'
 import { useActionState, useEffect, useMemo, useState } from 'react'
 import { accionArqueo, accionTurnoPreparar, type Resultado, type ResultadoTurno } from '../../acciones'
-import { BILLETES_CUP, calcularCuadre, CHECKLIST, porCuenta, reporteWhatsApp, totalPax, turnoDeHora, TURNO_LABEL, type ResumenTurno } from '@/lib/turno'
+import { BILLETES_CUP, calcularCuadre, CHECKLIST, pagadoEnTurno, personalPorDefecto, porCuenta, reporteWhatsApp, ROL_TURNO_LABEL, totalPax, totalSalarios, turnoDeHora, TURNO_LABEL, type PersonaTurno, type ResumenTurno } from '@/lib/turno'
 import type { Arqueo } from '@/lib/types'
 
 const f2 = (n: number) => n.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -120,6 +120,15 @@ export function HojaCierre({ turno, cajaNombre, inicial, cajeros, cuentas, categ
     }
     return o
   })
+  const [turnoSel, setTurnoSel] = useState<'dia' | 'noche'>(ini?.turno ?? turnoDeHora(turno.hasta))
+  const cajeroTPV = Object.entries(r.porCajero).sort((a, b) => b[1] - a[1])[0]?.[0] ?? ''
+  const [personal, setPersonal] = useState<PersonaTurno[]>(() => ini?.personal ?? personalPorDefecto(turnoSel, r.venta, ini?.cajero ?? cajeroTPV))
+  // Al cambiar de turno se proponen los salarios de ese turno; se conservan los nombres ya escritos.
+  const cambiarTurno = (t: 'dia' | 'noche') => {
+    setTurnoSel(t)
+    setPersonal((ps) => personalPorDefecto(t, r.venta, '').map((p) => ({ ...p, nombre: ps.find((x) => x.rol === p.rol)?.nombre ?? p.nombre })))
+  }
+  const setPersona = (i: number, cambio: Partial<PersonaTurno>) => setPersonal((ps) => ps.map((p, j) => (j === i ? { ...p, ...cambio } : p)))
   const [gastos, setGastos] = useState(ini?.gastos.length ? ini.gastos.map((g) => ({ concepto: g.concepto, importe: String(g.importe), categoria: g.categoria ?? 'OTROS GASTOS' })) : [{ concepto: '', importe: '', categoria: 'OTROS GASTOS' }])
   const [tarjetas, setTarjetas] = useState(
     ini?.tarjetas?.length
@@ -145,7 +154,8 @@ export function HojaCierre({ turno, cajaNombre, inicial, cajeros, cuentas, categ
         domicilio: num(v.domicilio),
         plataforma: num(v.plataforma),
         gastos: gastos.map((g) => ({ concepto: g.concepto, importe: num(g.importe) })),
-        salario: num(v.salario),
+        salario: totalSalarios(personal),
+        pagadoTurno: pagadoEnTurno(personal),
         transferencias,
         porCobrar: num(v.porCobrar),
         billetes: BILLETES_CUP.map((b) => ({ valor: b, cantidad: num(v[`b_${b}`]) })),
@@ -157,7 +167,7 @@ export function HojaCierre({ turno, cajaNombre, inicial, cajeros, cuentas, categ
         otros: num(v.otros),
         fondo: num(v.fondo),
       }),
-    [r.venta, v, gastos, transferencias],
+    [r.venta, v, gastos, transferencias, personal],
   )
   const transfDistinta = Math.abs(c.transferencias - noEfectivo) > 0.5
   const pendientesCk = CHECKLIST.flatMap((s) => s.grupos.flatMap((g) => g.items)).filter((i) => !ck[i.id]?.ok).length
@@ -198,25 +208,20 @@ export function HojaCierre({ turno, cajaNombre, inicial, cajeros, cuentas, categ
         <div className="mt-2 grid gap-3 sm:grid-cols-4">
           <label>
             <span className="etiqueta">Turno</span>
-            <select name="turno" defaultValue={ini?.turno ?? turnoDeHora(turno.hasta)} className="input">
+            <select name="turno" value={turnoSel} onChange={(e) => cambiarTurno(e.target.value as 'dia' | 'noche')} className="input">
               <option value="dia">{TURNO_LABEL.dia}</option>
               <option value="noche">{TURNO_LABEL.noche}</option>
             </select>
           </label>
-          <label>
-            <span className="etiqueta">Cajero(a)</span>
-            <input name="cajero" list="cajeros" defaultValue={ini?.cajero ?? Object.entries(r.porCajero).sort((a, b) => b[1] - a[1])[0]?.[0]} className="input" required />
-            <datalist id="cajeros">
-              {cajeros.map((x) => (
-                <option key={x} value={x} />
-              ))}
-            </datalist>
-          </label>
-          <label>
-            <span className="etiqueta">Cant. trabajadores</span>
-            <input {...campo('trabajadores', { inputMode: 'numeric' })} />
-          </label>
-          <div className="text-xs text-muted-foreground">
+          <input type="hidden" name="cajero" value={personal.find((p) => p.rol === 'cajero')?.nombre ?? ''} />
+          <input type="hidden" name="trabajadores" value={personal.filter((p) => p.nombre).length || 1} />
+          <datalist id="cajeros">
+            {cajeros.map((x) => (
+              <option key={x} value={x} />
+            ))}
+          </datalist>
+          <div className="text-xs text-muted-foreground sm:col-span-3">
+            Venta por usuario del TPV:
             {Object.entries(r.porCajero).map(([k, x]) => (
               <div key={k}>
                 {k}: {f2(x)}
@@ -271,9 +276,29 @@ export function HojaCierre({ turno, cajaNombre, inicial, cajeros, cuentas, categ
           <button type="button" className="text-xs text-primary hover:underline" onClick={() => setGastos((xs) => [...xs, { concepto: '', importe: '', categoria: 'OTROS GASTOS' }])}>
             + otro gasto
           </button>
-          <Fila label={`Salario propuesto (3 % = ${f2(turno.salario)})`}>
-            <input {...campo('salario')} />
-          </Fila>
+
+          <h3 className="mb-1 mt-4 text-sm font-semibold">Personal del turno</h3>
+          <p className="mb-1 text-xs text-muted-foreground">{turnoSel === 'dia' ? 'Día: cajero y dependiente 1,5 % de la venta cada uno.' : 'Noche: el cajero 3 % de la venta.'} Seguridad fija. «Pagado» = se cobró de la caja en el turno (se resta del esperado).</p>
+          {personal.map((p, i) => (
+            <div key={p.rol + i} className="mb-1 grid grid-cols-[5.5rem_1fr_6rem_3.5rem] items-center gap-1 text-sm">
+              <input type="hidden" name="p_rol" value={p.rol} />
+              <input type="hidden" name="p_pagado" value={p.pagadoEnTurno ? '1' : '0'} />
+              <span>{ROL_TURNO_LABEL[p.rol]}</span>
+              <input name="p_nombre" value={p.nombre} onChange={(e) => setPersona(i, { nombre: e.target.value })} list="cajeros" placeholder="Nombre" className="input" required={p.rol === 'cajero'} />
+              <input name="p_salario" value={p.salario || ''} onChange={(e) => setPersona(i, { salario: num(e.target.value) })} list={p.rol === 'seguridad' ? 'fijos-seguridad' : undefined} inputMode="decimal" className="input text-right" />
+              <label className="flex items-center gap-1 text-xs">
+                <input type="checkbox" checked={p.pagadoEnTurno} onChange={(e) => setPersona(i, { pagadoEnTurno: e.target.checked })} />
+                Pagado
+              </label>
+            </div>
+          ))}
+          <datalist id="fijos-seguridad">
+            <option value="2500" />
+            <option value="3500" />
+          </datalist>
+          <div className="text-right text-xs text-muted-foreground">
+            Salarios {f2(totalSalarios(personal))} · pagados en el turno {f2(pagadoEnTurno(personal))}
+          </div>
 
           <h3 className="mb-1 mt-4 text-sm font-semibold">Total transferencias {f2(c.transferencias)}</h3>
           {transferencias.map((t) => (

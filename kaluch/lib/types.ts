@@ -288,6 +288,8 @@ export interface Arqueo {
   turno: 'dia' | 'noche'
   cajero?: string
   trabajadores: number
+  /** Personal del turno y su salario (día: cajero y dependiente 1,5 % c/u; noche: cajero 3 %; seguridad fija). */
+  personal?: { rol: 'cajero' | 'dependiente' | 'seguridad'; nombre: string; salario: number; pagadoEnTurno: boolean }[]
   /** Lo que dice el TPV del turno (CUP). Pax: clientes marcados con los artículos de ESTADISTICA. */
   tpv: {
     tickets: number

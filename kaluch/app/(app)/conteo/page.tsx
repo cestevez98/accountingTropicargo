@@ -7,6 +7,7 @@ import { cargarDataset, preferencias } from '@/lib/data'
 import { params, type SP } from '@/lib/pagina'
 import { revisaConteos } from '@/lib/permisos'
 import { faltanteConteo } from '@/lib/nomina'
+import { gruposPorTienda, precioEnTienda } from '@/lib/sincro'
 import { prepararTasas, tasaVigente } from '@/lib/fx'
 import { Escaner } from './Escaner'
 
@@ -37,7 +38,13 @@ export default async function Conteo({ searchParams }: { searchParams: SP }) {
       .map((c) => ({ code: c, nombre: areaNombre(c) }))
   const tasaHoy = tasaVigente(prepararTasas(ds.tasas, ds.settings.margenTasa), new Date().toISOString().slice(0, 10))?.cupUsd ?? 0
   const porCodigo = new Map(ds.productos.map((p) => [p.codigo, p]))
-  const faltanteCUP = (c: (typeof ds.conteos)[number]) => faltanteConteo(c, (cod, usd) => porCodigo.get(cod)?.costoCUP ?? (porCodigo.get(cod)?.costoUSD ?? usd ?? 0) * tasaHoy)
+  // El faltante se descuenta a precio de venta de la tienda (si no lo hay, a costo).
+  const grupos = gruposPorTienda(ds.tiendas, ds.settings.axispos?.ubicaciones)
+  const faltanteCUP = (c: (typeof ds.conteos)[number]) =>
+    faltanteConteo(c, (cod, usd) => {
+      const p = porCodigo.get(cod)
+      return (p && precioEnTienda(p, grupos.get(c.tienda))) || p?.costoCUP || (p?.costoUSD ?? usd ?? 0) * tasaHoy
+    })
   // Quienes cerraron turno en la tienda últimamente (para descontarles un faltante).
   const trabajadoresTienda = (t: string) => [...new Set(ds.arqueos.filter((a) => a.tienda === t && a.cajero).slice(0, 30).map((a) => a.cajero!))]
   const historia = ds.conteos.filter((c) => c.estado === 'cerrado' && (!fija || c.tienda === fija)).slice(0, 60)
@@ -76,7 +83,7 @@ export default async function Conteo({ searchParams }: { searchParams: SP }) {
                   <label>
                     <span className="etiqueta">Importe a descontar (CUP)</span>
                     <input name="descuento" defaultValue={faltanteCUP(sel) || ''} inputMode="decimal" className="input text-right" />
-                    <span className="text-xs text-muted-foreground">Faltante a costo: {f2(faltanteCUP(sel))} CUP</span>
+                    <span className="text-xs text-muted-foreground">Faltante a precio de venta: {f2(faltanteCUP(sel))} CUP</span>
                   </label>
                 </div>
                 <label className="mr-2 inline-flex items-center gap-2">

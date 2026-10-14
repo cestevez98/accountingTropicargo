@@ -274,3 +274,22 @@ describe('pagos al personal', () => {
     expect(faltanteConteo(c, (cod) => (cod === '1' ? 600 : 100))).toBe(1200)
   })
 })
+
+import { pagadoEnTurno as pagadoTurnoDe, personalPorDefecto } from '../lib/turno'
+
+describe('personal del turno', () => {
+  it('día: cajero y dependiente 1,5 % cada uno; noche: cajero 3 %; seguridad fija pagada en el turno', () => {
+    expect(personalPorDefecto('dia', 160560, 'YARA')).toEqual([
+      { rol: 'cajero', nombre: 'YARA', salario: 2400, pagadoEnTurno: false },
+      { rol: 'dependiente', nombre: '', salario: 2400, pagadoEnTurno: false },
+      { rol: 'seguridad', nombre: '', salario: 2500, pagadoEnTurno: true },
+    ])
+    const noche = personalPorDefecto('noche', 158000, 'KEVIN')
+    expect(noche.map((p) => [p.rol, p.salario])).toEqual([['cajero', 4740], ['seguridad', 2500]])
+  })
+
+  it('la seguridad pagada en el turno se resta del esperado como en la hoja', () => {
+    const c = calcularCuadre({ ventaTienda: 158000, domicilio: 0, plataforma: 0, gastos: [], salario: 0, transferencias: [], porCobrar: 0, billetes: [{ valor: 5000, cantidad: 8 }, { valor: 2000, cantidad: 4 }, { valor: 1000, cantidad: 8 }, { valor: 500, cantidad: 21 }, { valor: 100, cantidad: 5 }, { valor: 50, cantidad: 10 }], sueltosCUP: 0, usd: 113, tasaUSD: 770, eur: 0, tasaEUR: 0, otros: 0, pagadoTurno: pagadoTurnoDe([{ rol: 'seguridad', nombre: 'X', salario: 3500, pagadoEnTurno: true }]) })
+    expect(c).toMatchObject({ esperado: 154500, diferencia: 10 })
+  })
+})
